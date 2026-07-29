@@ -114,7 +114,10 @@ func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error 
 		map[string]any{"balance": res.Balance})
 
 	if c.BalanceThreshold > 0 && res.Balance < c.BalanceThreshold {
-		body := fmt.Sprintf("当前余额: %.4f，阈值: %.4f", res.Balance, c.BalanceThreshold)
+		body := notify.AppendRechargeURL(
+			fmt.Sprintf("当前余额: %.4f，阈值: %.4f", res.Balance, c.BalanceThreshold),
+			c.RechargeURL,
+		)
 		_ = s.dispatcher.Dispatch(ctx, notify.Message{
 			Event:     storage.EventBalanceLow,
 			ChannelID: c.ID,
@@ -222,7 +225,7 @@ func (s *Service) notifyError(ctx context.Context, c *storage.Channel, event sto
 		Event:     event,
 		ChannelID: c.ID,
 		Subject:   fmt.Sprintf("[upstream-hub] %s %s", c.Name, subject),
-		Body:      err.Error(),
+		Body:      notify.AppendRechargeURL(err.Error(), c.RechargeURL),
 	})
 }
 

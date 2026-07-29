@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -34,6 +35,7 @@ type channelInput struct {
 	Name             string                 `json:"name" binding:"required"`
 	Type             storage.ChannelType    `json:"type" binding:"required"`
 	SiteURL          string                 `json:"site_url" binding:"required"`
+	RechargeURL      string                 `json:"recharge_url"`
 	Username         string                 `json:"username"`
 	Password         string                 `json:"password"`
 	CredentialMode   storage.CredentialMode `json:"credential_mode"`
@@ -47,6 +49,7 @@ type channelInput struct {
 type channelUpdateInput struct {
 	Name             *string                 `json:"name"`
 	SiteURL          *string                 `json:"site_url"`
+	RechargeURL      *string                 `json:"recharge_url"`
 	Username         *string                 `json:"username"`
 	Password         *string                 `json:"password"`
 	CredentialMode   *storage.CredentialMode `json:"credential_mode"`
@@ -76,6 +79,7 @@ func createChannel(c *gin.Context, d *Deps) {
 		Name:             in.Name,
 		Type:             in.Type,
 		SiteURL:          in.SiteURL,
+		RechargeURL:      in.RechargeURL,
 		Username:         in.Username,
 		Password:         in.Password,
 		CredentialMode:   in.CredentialMode,
@@ -86,6 +90,10 @@ func createChannel(c *gin.Context, d *Deps) {
 		MonitorEnabled:   in.MonitorEnabled,
 	})
 	if err != nil {
+		if errors.Is(err, channel.ErrInvalidRechargeURL) {
+			fail(c, http.StatusBadRequest, err)
+			return
+		}
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -120,6 +128,7 @@ func updateChannel(c *gin.Context, d *Deps) {
 	updated, err := d.ChannelSvc.Update(id, channel.UpdateInput{
 		Name:             in.Name,
 		SiteURL:          in.SiteURL,
+		RechargeURL:      in.RechargeURL,
 		Username:         in.Username,
 		Password:         in.Password,
 		CredentialMode:   in.CredentialMode,
@@ -130,6 +139,10 @@ func updateChannel(c *gin.Context, d *Deps) {
 		MonitorEnabled:   in.MonitorEnabled,
 	})
 	if err != nil {
+		if errors.Is(err, channel.ErrInvalidRechargeURL) {
+			fail(c, http.StatusBadRequest, err)
+			return
+		}
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}

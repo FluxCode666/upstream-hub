@@ -69,7 +69,6 @@ async function streamSSE(
       }
       buf += decoder.decode(value, { stream: true })
       let idx
-      // eslint-disable-next-line no-cond-assign
       while ((idx = buf.indexOf("\n\n")) >= 0) {
         const block = buf.slice(0, idx)
         buf = buf.slice(idx + 2)

@@ -51,6 +51,7 @@ interface FormState {
   name: string
   type: ChannelType
   site_url: string
+  recharge_url: string
   username: string
   password: string
 
@@ -72,6 +73,7 @@ function initialState(c?: Channel | null): FormState {
     name: c?.name ?? "",
     type: c?.type ?? "newapi",
     site_url: c?.site_url ?? "",
+    recharge_url: c?.recharge_url ?? "",
     username: c?.username ?? "",
     password: "",
     credential_mode: c?.credential_mode ?? "password",
@@ -131,6 +133,22 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
         throw new Error("余额阈值必须是非负数")
       }
 
+      const rechargeURL = form.recharge_url.trim()
+      if (rechargeURL) {
+        let parsed: URL
+        try {
+          parsed = new URL(rechargeURL)
+        } catch {
+          throw new Error("充值链接必须是有效的 http/https 地址")
+        }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          throw new Error("充值链接必须是有效的 http/https 地址")
+        }
+        if (parsed.username || parsed.password) {
+          throw new Error("充值链接不能包含用户名或密码")
+        }
+      }
+
       // token 模式：用户填的字段对应不同 connector 的 token JSON
       let tokenCredential = ""
       if (isTokenMode) {
@@ -175,6 +193,7 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
         const body: Record<string, unknown> = {
           name: form.name,
           site_url: form.site_url,
+          recharge_url: rechargeURL,
           username: form.username,
           credential_mode: form.credential_mode,
           balance_threshold: threshold,
@@ -195,6 +214,7 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
             name: form.name,
             type: form.type,
             site_url: form.site_url,
+            recharge_url: rechargeURL,
             username: form.username,
             credential_mode: form.credential_mode,
             password: isTokenMode ? "" : form.password,
@@ -268,6 +288,22 @@ export function ChannelFormDialog({ open, onOpenChange, channel }: ChannelFormDi
               required
               disabled={submitting}
             />
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="recharge_url">充值链接（可选）</Label>
+            <Input
+              id="recharge_url"
+              type="url"
+              placeholder="https://example.com/topup"
+              value={form.recharge_url}
+              onChange={(e) => setForm({ ...form, recharge_url: e.target.value })}
+              maxLength={2048}
+              disabled={submitting}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              配置后，余额、倍率和异常通知会附带该链接
+            </p>
           </div>
 
           {/* 凭据类型 toggle */}

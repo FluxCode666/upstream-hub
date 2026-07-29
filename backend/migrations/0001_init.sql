@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS channels (
     name              VARCHAR(128) NOT NULL,
     type              VARCHAR(32)  NOT NULL,
     site_url          VARCHAR(512) NOT NULL,
+    recharge_url      VARCHAR(2048) NOT NULL DEFAULT '',
     username          VARCHAR(256) NOT NULL,
     password_cipher   VARCHAR(4096) NOT NULL,
     credential_mode   VARCHAR(16)  NOT NULL DEFAULT 'password',

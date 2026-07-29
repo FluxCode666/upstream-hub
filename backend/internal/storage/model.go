@@ -42,6 +42,7 @@ type Channel struct {
 	Name             string         `gorm:"size:128;not null;uniqueIndex" json:"name"`
 	Type             ChannelType    `gorm:"size:32;not null;index" json:"type"`
 	SiteURL          string         `gorm:"size:512;not null" json:"site_url"`
+	RechargeURL      string         `gorm:"size:2048;not null;default:''" json:"recharge_url"`
 	Username         string         `gorm:"size:256;not null" json:"username"`
 	PasswordCipher   string         `gorm:"size:4096;not null" json:"-"`
 	CredentialMode   CredentialMode `gorm:"size:16;not null;default:'password'" json:"credential_mode"`

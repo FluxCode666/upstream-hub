@@ -36,6 +36,7 @@ export interface Channel {
   name: string
   type: ChannelType
   site_url: string
+  recharge_url: string
   username: string
   credential_mode: CredentialMode
   turnstile_enabled: boolean

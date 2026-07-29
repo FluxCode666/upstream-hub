@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,6 +25,9 @@ const SessionRefreshThreshold = 5 * time.Minute
 // token 由用户提供，我们没法续期，这里设一年只是为了避免 SessionRefreshThreshold 把它判过期。
 // 真正失效检测靠 connector.CheckAuth + 上游 401/403。
 const tokenSessionTTL = 365 * 24 * time.Hour
+
+// ErrInvalidRechargeURL 标识充值链接未通过输入校验，API 层应映射为 400。
+var ErrInvalidRechargeURL = errors.New("充值链接无效")
 
 // Service 渠道领域服务。
 type Service struct {
@@ -73,6 +77,7 @@ type CreateInput struct {
 	Name             string
 	Type             storage.ChannelType
 	SiteURL          string
+	RechargeURL      string
 	Username         string
 	Password         string
 	CredentialMode   storage.CredentialMode
@@ -84,6 +89,10 @@ type CreateInput struct {
 }
 
 func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
+	rechargeURL, err := normalizeRechargeURL(in.RechargeURL)
+	if err != nil {
+		return nil, err
+	}
 	mode := in.CredentialMode
 	if mode == "" {
 		mode = storage.CredentialModePassword
@@ -104,6 +113,7 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 		Name:             in.Name,
 		Type:             in.Type,
 		SiteURL:          in.SiteURL,
+		RechargeURL:      rechargeURL,
 		Username:         in.Username,
 		PasswordCipher:   enc,
 		CredentialMode:   mode,
@@ -126,6 +136,7 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 type UpdateInput struct {
 	Name             *string
 	SiteURL          *string
+	RechargeURL      *string
 	Username         *string
 	Password         *string
 	CredentialMode   *storage.CredentialMode
@@ -146,6 +157,13 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 	}
 	if in.SiteURL != nil {
 		c.SiteURL = *in.SiteURL
+	}
+	if in.RechargeURL != nil {
+		rechargeURL, err := normalizeRechargeURL(*in.RechargeURL)
+		if err != nil {
+			return nil, err
+		}
+		c.RechargeURL = rechargeURL
 	}
 	if in.Username != nil {
 		c.Username = *in.Username
@@ -221,6 +239,26 @@ func (s *Service) Update(id uint, in UpdateInput) (*storage.Channel, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// normalizeRechargeURL 统一充值链接的空值和安全协议语义。
+// 该链接只会作为通知内容展示，不会由服务端主动访问。
+func normalizeRechargeURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 2048 {
+		return "", fmt.Errorf("%w：不能超过 2048 个字符", ErrInvalidRechargeURL)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", fmt.Errorf("%w：必须是有效的 http/https 地址", ErrInvalidRechargeURL)
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("%w：不能包含用户名或密码", ErrInvalidRechargeURL)
+	}
+	return value, nil
 }
 
 // selectRawCredential 在 Create 时根据 mode 决定要落库的明文凭据字符串。

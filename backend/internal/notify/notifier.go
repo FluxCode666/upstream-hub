@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/worryzyy/upstream-hub/internal/storage"
@@ -25,6 +26,20 @@ type Message struct {
 	Subject   string
 	Body      string
 	Extra     map[string]any
+}
+
+// AppendRechargeURL 在渠道配置了充值地址时，把地址追加到通知正文。
+// 所有通知实现都消费 Body，因此在消息构造阶段处理可以保证各通知渠道行为一致。
+func AppendRechargeURL(body, rechargeURL string) string {
+	rechargeURL = strings.TrimSpace(rechargeURL)
+	if rechargeURL == "" {
+		return body
+	}
+	body = strings.TrimRight(body, "\n")
+	if body == "" {
+		return "充值链接：" + rechargeURL
+	}
+	return body + "\n充值链接：" + rechargeURL
 }
 
 // Notifier 通知渠道抽象。

@@ -67,11 +67,11 @@ func BuildBatchMessage(channel *storage.Channel, changes []RateChange) Message {
 			ChannelID: channel.ID,
 			ModelName: c.GroupName,
 			Subject:   fmt.Sprintf("【倍率变化提醒】%s · %s", channel.Name, c.GroupName),
-			Body: fmt.Sprintf(
+			Body: AppendRechargeURL(fmt.Sprintf(
 				"渠道：%s\n分组倍率：%s 由 %g %s至 %g\n变化时间：%s",
 				channel.Name, c.GroupName, c.OldRatio, arrowFor(c.OldRatio, c.NewRatio), c.NewRatio,
 				now.Format("2006-01-02 15:04"),
-			),
+			), channel.RechargeURL),
 		}
 	}
 
@@ -90,7 +90,7 @@ func BuildBatchMessage(channel *storage.Channel, changes []RateChange) Message {
 		ChannelID: channel.ID,
 		ModelName: "",
 		Subject:   fmt.Sprintf("【倍率变化提醒】%s · %d 个分组变动", channel.Name, len(changes)),
-		Body:      b.String(),
+		Body:      AppendRechargeURL(b.String(), channel.RechargeURL),
 	}
 }
 
