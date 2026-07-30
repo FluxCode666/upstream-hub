@@ -61,10 +61,11 @@ http://localhost:8080
 
 ```env
 UPSTREAMHUB_IMAGE=worryzyy/upstream-hub
-UPSTREAMHUB_IMAGE_TAG=sha-完整提交哈希
+UPSTREAMHUB_IMAGE_TAG=v1.0.0
 ```
 
-生产环境的 GitHub Actions 配置、服务器准备、Secrets/Variables 清单及回滚方法见
+生产流水线会自动改用当前仓库对应的 GHCR 镜像。GitHub Actions 配置、服务器准备、
+精简 Secrets 清单及回滚方法见
 [生产环境 CI/CD 部署文档](docs/cicd-production.md)。
 
 ## 通知渠道配置

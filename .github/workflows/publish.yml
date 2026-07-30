@@ -1,46 +1,84 @@
 name: Deploy Production
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "部署已有镜像标签；留空则构建当前提交（回滚时填写 sha-<commit>）"
-        required: false
-        default: ""
+      version:
+        description: "生产镜像版本，例如 v1.0.0"
+        required: true
         type: string
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
-  group: production-deploy
+  group: upstream-hub-production-deploy
   cancel-in-progress: false
+
+env:
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   verify:
-    name: Quality Gate
-    if: github.event_name != 'workflow_dispatch' || inputs.image_tag == ''
+    name: Verify Release Candidate
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      source_commit: ${{ steps.release.outputs.source_commit }}
+      source_ref: ${{ steps.release.outputs.source_ref }}
+      source_type: ${{ steps.release.outputs.source_type }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Validate release version
+        id: release
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_REF: ${{ github.ref_name }}
+          SOURCE_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::version 必须是合法的 Docker 镜像标签"
+            exit 1
+          fi
+
+          source_commit="$(git rev-parse HEAD)"
+
+          if [[ "$SOURCE_TYPE" == "tag" ]]; then
+            tag_commit="$(git rev-list -n 1 "refs/tags/$SOURCE_REF")"
+            if [[ "$tag_commit" != "$source_commit" ]]; then
+              echo "::error::所选 Tag 与检出的提交不一致"
+              exit 1
+            fi
+          elif [[ "$SOURCE_TYPE" != "branch" ]]; then
+            echo "::error::仅支持从 Git Tag 或分支部署"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
+          echo "source_type=$SOURCE_TYPE" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: Vet backend
+      - name: Check backend
         working-directory: backend
-        run: go vet ./...
-
-      - name: Test backend
-        working-directory: backend
-        run: go test ./...
+        run: |
+          go vet ./...
+          go test ./...
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -55,263 +93,161 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
-      - name: Install frontend dependencies
+      - name: Check frontend
         working-directory: frontend
-        run: pnpm install --frozen-lockfile
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm audit --audit-level critical
+          pnpm lint
+          pnpm typecheck
+          pnpm build
 
-      - name: Audit frontend dependencies
-        working-directory: frontend
-        run: pnpm audit --audit-level critical
-
-      - name: Lint frontend
-        working-directory: frontend
-        run: pnpm lint
-
-      - name: Type check frontend
-        working-directory: frontend
-        run: pnpm typecheck
-
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm build
-
-  release:
-    name: Build and Deploy
+  build-and-push:
+    name: Build and Push Image
     needs: verify
-    if: always() && (needs.verify.result == 'success' || needs.verify.result == 'skipped')
     runs-on: ubuntu-latest
-    environment: production
-    env:
-      BUILD_IMAGE: ${{ github.event_name != 'workflow_dispatch' || inputs.image_tag == '' }}
-      IMAGE_REPOSITORY: ${{ vars.DOCKER_IMAGE }}
-      IMAGE_TAG: ${{ inputs.image_tag || format('sha-{0}', github.sha) }}
-      COMPOSE_DIR: ${{ vars.PROD_COMPOSE_DIR }}
-      COMPOSE_FILE: ${{ vars.PROD_COMPOSE_FILE || 'docker-compose.yml' }}
-      COMPOSE_SERVICE: ${{ vars.PROD_COMPOSE_SERVICE || 'app' }}
-      COMPOSE_ENV_FILE: ${{ vars.PROD_COMPOSE_ENV_FILE || '.env' }}
-      DEPLOY_RUN_ID: ${{ github.run_id }}
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      version: ${{ needs.verify.outputs.version }}
     steps:
-      - name: Validate production configuration
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.source_commit }}
+
+      - name: Set image metadata
+        id: meta
         shell: bash
-        env:
-          SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
-          SSH_USERNAME: ${{ secrets.PROD_SSH_USERNAME }}
-          SSH_PASSWORD: ${{ secrets.PROD_SSH_PASSWORD }}
-          SSH_FINGERPRINT: ${{ secrets.PROD_SSH_FINGERPRINT }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          PROD_REGISTRY_USERNAME: ${{ secrets.PROD_REGISTRY_USERNAME }}
-          PROD_REGISTRY_TOKEN: ${{ secrets.PROD_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-
-          required_values=(
-            IMAGE_REPOSITORY
-            COMPOSE_DIR
-            SSH_HOST
-            SSH_USERNAME
-            SSH_PASSWORD
-            SSH_FINGERPRINT
-          )
-
-          for name in "${required_values[@]}"; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::缺少生产环境配置：${name}"
-              exit 1
-            fi
-          done
-
-          if [[ "$BUILD_IMAGE" == "true" ]]; then
-            for name in DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
-              if [ -z "${!name:-}" ]; then
-                echo "::error::构建镜像时缺少 Docker Hub 配置：${name}"
-                exit 1
-              fi
-            done
-          fi
-
-          if [[ -n "${PROD_REGISTRY_USERNAME:-}" || -n "${PROD_REGISTRY_TOKEN:-}" ]]; then
-            if [[ -z "${PROD_REGISTRY_USERNAME:-}" || -z "${PROD_REGISTRY_TOKEN:-}" ]]; then
-              echo "::error::PROD_REGISTRY_USERNAME 和 PROD_REGISTRY_TOKEN 必须同时配置"
-              exit 1
-            fi
-          fi
-
-          if [[ ! "$IMAGE_REPOSITORY" =~ ^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+$ ]]; then
-            echo "::error::DOCKER_IMAGE 格式无效：${IMAGE_REPOSITORY}"
-            exit 1
-          fi
-
-          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "::error::镜像标签格式无效：${IMAGE_TAG}"
-            exit 1
-          fi
-
-      - name: Checkout
-        if: env.BUILD_IMAGE == 'true'
-        uses: actions/checkout@v4
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/$owner/upstream-hub" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        if: env.BUILD_IMAGE == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        if: env.BUILD_IMAGE == 'true'
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
-        if: env.BUILD_IMAGE == 'true'
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push production image
-        if: env.BUILD_IMAGE == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: ${{ vars.DOCKER_PLATFORMS || 'linux/amd64' }}
+          platforms: ${{ env.PLATFORMS }}
           push: true
-          tags: |
-            ${{ env.IMAGE_REPOSITORY }}:${{ env.IMAGE_TAG }}
-            ${{ env.IMAGE_REPOSITORY }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta.outputs.image }}:${{ needs.verify.outputs.version }}
+          cache-from: type=gha,scope=upstream-hub-production
+          cache-to: type=gha,mode=max,scope=upstream-hub-production
           provenance: false
 
-      - name: Deploy with Docker Compose over SSH
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          REGISTRY_USERNAME: ${{ secrets.PROD_REGISTRY_USERNAME }}
-          REGISTRY_TOKEN: ${{ secrets.PROD_REGISTRY_TOKEN }}
+  deploy:
+    name: Deploy Production
+    needs: [verify, build-and-push]
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      GHCR_IMAGE: ${{ needs.build-and-push.outputs.image }}
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.version }}
+      GHCR_USER: ${{ secrets.GHCR_USERNAME || github.repository_owner }}
+      GHCR_PAT: ${{ secrets.GHCR_PAT }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/upstream-hub' }}
+    steps:
+      - name: Deploy with SSH username and password
+        uses: appleboy/ssh-action@v1.2.2
         with:
-          host: ${{ secrets.PROD_SSH_HOST }}
-          port: ${{ vars.PROD_SSH_PORT || 22 }}
-          username: ${{ secrets.PROD_SSH_USERNAME }}
-          password: ${{ secrets.PROD_SSH_PASSWORD }}
-          fingerprint: ${{ secrets.PROD_SSH_FINGERPRINT }}
-          command_timeout: 10m
-          envs: IMAGE_REPOSITORY,IMAGE_TAG,COMPOSE_DIR,COMPOSE_FILE,COMPOSE_SERVICE,COMPOSE_ENV_FILE,DEPLOY_RUN_ID,REGISTRY_USERNAME,REGISTRY_TOKEN
+          host: ${{ secrets.DEPLOY_HOSTS }}
+          username: ${{ secrets.DEPLOY_USER || 'root' }}
+          password: ${{ secrets.DEPLOY_PASSWORD }}
+          port: ${{ secrets.DEPLOY_PORT || '22' }}
+          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
+          envs: GHCR_IMAGE,IMAGE_TAG,GHCR_USER,GHCR_PAT,DEPLOY_PATH
+          sync: true
+          command_timeout: 20m
           script: |
             set -eu
             umask 077
+            cd "$DEPLOY_PATH"
 
-            cd "$COMPOSE_DIR"
+            docker compose version >/dev/null
+            [ -f docker-compose.yml ] || { echo "缺少 $DEPLOY_PATH/docker-compose.yml" >&2; exit 1; }
+            [ -f .env ] || { echo "缺少 $DEPLOY_PATH/.env" >&2; exit 1; }
 
-            if [ ! -f "$COMPOSE_FILE" ]; then
-              echo "未找到 Compose 文件：$COMPOSE_DIR/$COMPOSE_FILE"
-              exit 1
-            fi
+            cp .env .env.cicd.previous
 
-            if [ ! -f "$COMPOSE_ENV_FILE" ]; then
-              echo "未找到环境变量文件：$COMPOSE_DIR/$COMPOSE_ENV_FILE"
-              exit 1
-            fi
+            rollback() {
+              status="$?"
+              trap - 0
+              echo "部署失败，正在恢复上一版本配置" >&2
+              cp .env.cicd.previous .env
+              docker compose up -d --no-build app || true
+              exit "$status"
+            }
+            trap rollback 0
 
-            docker compose version
-
-            if [ -n "${REGISTRY_USERNAME:-}" ] && [ -n "${REGISTRY_TOKEN:-}" ]; then
-              printf '%s' "$REGISTRY_TOKEN" | docker login --username "$REGISTRY_USERNAME" --password-stdin
-            fi
-
-            export UPSTREAMHUB_IMAGE="$IMAGE_REPOSITORY"
-            export UPSTREAMHUB_IMAGE_TAG="$IMAGE_TAG"
-
-            docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" config --quiet
-            docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" pull "$COMPOSE_SERVICE"
-
-            previous_container_id="$(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" ps -aq "$COMPOSE_SERVICE" 2>/dev/null || true)"
-            rollback_tag=""
-
-            if [ -n "$previous_container_id" ]; then
-              previous_image_id="$(docker inspect --format '{{.Image}}' "$previous_container_id")"
-              rollback_tag="rollback-$DEPLOY_RUN_ID"
-              docker tag "$previous_image_id" "$IMAGE_REPOSITORY:$rollback_tag"
+            if [ -n "${GHCR_PAT:-}" ]; then
+              printf '%s' "$GHCR_PAT" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
             fi
 
             set_env_value() {
               key="$1"
               value="$2"
-              file="$3"
-              escaped_value="$(printf '%s' "$value" | sed 's/[&|\\]/\\&/g')"
-
-              if grep -q "^${key}=" "$file"; then
-                sed -i "s|^${key}=.*$|${key}=${escaped_value}|" "$file"
+              if grep -q "^${key}=" .env; then
+                escaped_value="$(printf '%s' "$value" | sed 's/[&|\\]/\\&/g')"
+                sed -i "s|^${key}=.*$|${key}=${escaped_value}|" .env
               else
-                printf '\n%s=%s\n' "$key" "$value" >> "$file"
+                printf '\n%s=%s\n' "$key" "$value" >> .env
               fi
             }
 
-            set_env_value UPSTREAMHUB_IMAGE "$IMAGE_REPOSITORY" "$COMPOSE_ENV_FILE"
-            set_env_value UPSTREAMHUB_IMAGE_TAG "$IMAGE_TAG" "$COMPOSE_ENV_FILE"
+            set_env_value UPSTREAMHUB_IMAGE "$GHCR_IMAGE"
+            set_env_value UPSTREAMHUB_IMAGE_TAG "$IMAGE_TAG"
 
-            rollback() {
-              if [ -z "$rollback_tag" ]; then
-                echo "部署失败，且没有可回滚的旧容器。"
-                return
-              fi
+            docker compose config --quiet
+            docker compose config --services | grep -qx app
+            docker compose pull app
+            docker compose up -d --no-build app
 
-              echo "部署失败，正在回滚到部署前镜像：$IMAGE_REPOSITORY:$rollback_tag"
-              export UPSTREAMHUB_IMAGE_TAG="$rollback_tag"
-              set_env_value UPSTREAMHUB_IMAGE_TAG "$rollback_tag" "$COMPOSE_ENV_FILE"
-              docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$COMPOSE_SERVICE"
-            }
+            container_id="$(docker compose ps -q app)"
+            [ -n "$container_id" ]
 
-            if ! docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" up -d --no-deps --force-recreate "$COMPOSE_SERVICE"; then
-              rollback
-              exit 1
-            fi
-
-            container_id="$(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" ps -q "$COMPOSE_SERVICE")"
-
-            if [ -z "$container_id" ]; then
-              echo "部署后未找到服务容器：$COMPOSE_SERVICE"
-              rollback
-              exit 1
-            fi
-
-            deployment_healthy=false
             attempt=1
+            while [ "$attempt" -le 36 ]; do
+              health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+              echo "健康检查 $attempt/36：$health"
 
-            while [ "$attempt" -le 30 ]; do
-              container_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
-              echo "健康检查 $attempt/30：$container_status"
+              if [ "$health" = "healthy" ] || [ "$health" = "running" ]; then
+                break
+              fi
 
-              case "$container_status" in
-                healthy|running)
-                  deployment_healthy=true
-                  break
-                  ;;
-                unhealthy|exited|dead)
-                  break
-                  ;;
-              esac
+              if [ "$health" = "unhealthy" ] || [ "$health" = "exited" ] || [ "$attempt" -eq 36 ]; then
+                docker compose logs --tail=100 app || true
+                exit 1
+              fi
 
               attempt=$((attempt + 1))
-              sleep 2
+              sleep 5
             done
 
-            if [ "$deployment_healthy" != "true" ]; then
-              docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" logs --tail=100 "$COMPOSE_SERVICE" || true
-              rollback
-              exit 1
-            fi
-
-            if [ -n "$rollback_tag" ]; then
-              docker image rm "$IMAGE_REPOSITORY:$rollback_tag" >/dev/null 2>&1 || true
-            fi
-
-            docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" ps "$COMPOSE_SERVICE"
-            echo "生产环境部署完成：$IMAGE_REPOSITORY:$IMAGE_TAG"
+            docker compose ps app
+            docker logout ghcr.io >/dev/null 2>&1 || true
+            trap - 0
+            echo "生产环境部署完成：$GHCR_IMAGE:$IMAGE_TAG"
 
       - name: Deployment summary
         if: always()
         run: |
           {
-            echo "### 生产部署"
-            echo "- 镜像：\`${IMAGE_REPOSITORY}:${IMAGE_TAG}\`"
-            echo "- Compose 目录：\`${COMPOSE_DIR}\`"
-            echo "- Compose 服务：\`${COMPOSE_SERVICE}\`"
+            echo "## 生产部署"
+            echo "- 源代码：\`${{ needs.verify.outputs.source_type }}:${{ needs.verify.outputs.source_ref }}\`"
+            echo "- 镜像：\`${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}\`"
+            echo "- 提交：\`${{ needs.verify.outputs.source_commit }}\`"
+            echo "- 操作者：${{ github.actor }}"
           } >> "$GITHUB_STEP_SUMMARY"
