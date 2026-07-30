@@ -14,7 +14,7 @@
 
 4. 使用 SSH 用户名和密码连接服务器，进入 `/opt/upstream-hub`。
 5. 更新服务器 `.env` 中的 `UPSTREAMHUB_IMAGE` 和 `UPSTREAMHUB_IMAGE_TAG`，然后执行 Docker Compose 部署。
-6. 等待容器健康检查；失败时恢复 `.env.cicd.previous` 并重新启动上一版本。
+6. 等待容器健康检查；失败时恢复 `.env.cicd.previous`，并使用部署前容器的本地镜像 ID 重新启动上一版本。
 
 ## GitHub 配置
 
@@ -43,7 +43,7 @@
 | `DEPLOY_PATH` | `/opt/upstream-hub` | 服务器上的 Docker Compose 目录。 |
 | `SSH_FINGERPRINT` | 空 | SSH Host Key 的 SHA256 指纹，生产环境建议配置。 |
 | `GHCR_USERNAME` | 仓库所有者 | 用于服务器登录 GHCR 的用户名。 |
-| `GHCR_PAT` | 空 | 私有 GHCR 镜像必需，Token 至少需要 `read:packages`；公开镜像不需要。 |
+| `GHCR_PAT` | 空 | 私有 GHCR 镜像必需，应使用 classic PAT 并授予 `read:packages`；公开镜像不要配置。 |
 
 最简配置只有两个 Secrets：`DEPLOY_HOSTS` 和 `DEPLOY_PASSWORD`。此时要求 SSH 用户为 `root`、端口为 `22`、部署目录为 `/opt/upstream-hub`，并且 GHCR 镜像可公开拉取。
 
@@ -54,7 +54,9 @@ GitHub Actions 推送镜像使用自动生成的 `GITHUB_TOKEN`，无需手动�
 首次发布后可在 GitHub 仓库或个人主页的 `Packages` 中找到 `upstream-hub`：
 
 - 将 Package 设置为 Public：服务器无需 Registry Token。
-- 保持 Private：创建具有 `read:packages` 权限的 PAT，保存为 `GHCR_PAT`；如 PAT 所属账号不是仓库所有者，同时配置 `GHCR_USERNAME`。
+- 保持 Private：创建 classic PAT，授予 `read:packages` 权限并保存为 `GHCR_PAT`；如 PAT 所属账号不是仓库所有者，同时配置 `GHCR_USERNAME`。组织启用了 SSO 时还需为该 Token 授权 SSO。
+
+流水线会先验证目标镜像能够拉取，再修改 `.env` 或重建容器。GHCR 登录或镜像拉取失败时，当前运行中的服务不会被触碰。若误配了 `GHCR_PAT` 但 Package 是 Public，流水线会清除失败的临时登录状态并尝试匿名拉取。
 
 ## 生产服务器准备
 
@@ -120,15 +122,14 @@ gh workflow run publish.yml --ref v1.0.0 -f version=v1.0.0
 
 ## 回滚
 
-部署失败时，流水线会自动恢复 `.env.cicd.previous` 并重新启动上一镜像。
+部署失败时，流水线会自动恢复 `.env.cicd.previous`，并将部署前容器的镜像 ID 临时标记为本地回滚镜像后重新启动。回滚不再依赖旧镜像标签仍能从 Registry 拉取。
 
 手动回滚：
 
 ```bash
 cd /opt/upstream-hub
 cp .env.cicd.previous .env
-docker compose pull app
-docker compose up -d --no-build app
+docker compose up -d --no-build --pull never app
 docker compose ps app
 ```
 
@@ -137,6 +138,7 @@ docker compose ps app
 ## 常见问题
 
 - SSH 失败：检查 `DEPLOY_HOSTS`、`DEPLOY_PASSWORD`，以及可选的 `DEPLOY_USER`、`DEPLOY_PORT`。
-- 镜像拉取失败：公开镜像检查 Package 可见性；私有镜像检查 `GHCR_PAT` 的 `read:packages` 权限。
+- GHCR 返回 `denied`：公开 Package 应删除 `GHCR_PAT`；私有 Package 应检查 `GHCR_USERNAME`，并确认使用已授权 `read:packages` 的 classic PAT。
+- 镜像拉取失败：确认 Package 中确实存在当前 `version` 对应的镜像标签，并检查 Package 可见性。
 - Compose 文件找不到：确认 `DEPLOY_PATH` 指向包含 `docker-compose.yml` 和 `.env` 的目录。
 - 健康检查失败：查看 `docker compose logs --tail=100 app`，并检查 PostgreSQL、`APP_SECRET` 和端口配置。

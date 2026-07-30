@@ -159,6 +159,7 @@ jobs:
       GHCR_USER: ${{ secrets.GHCR_USERNAME || github.repository_owner }}
       GHCR_PAT: ${{ secrets.GHCR_PAT }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/upstream-hub' }}
+      DEPLOY_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Deploy with SSH username and password
         uses: appleboy/ssh-action@v1.2.2
@@ -168,7 +169,7 @@ jobs:
           password: ${{ secrets.DEPLOY_PASSWORD }}
           port: ${{ secrets.DEPLOY_PORT || '22' }}
           fingerprint: ${{ secrets.SSH_FINGERPRINT }}
-          envs: GHCR_IMAGE,IMAGE_TAG,GHCR_USER,GHCR_PAT,DEPLOY_PATH
+          envs: GHCR_IMAGE,IMAGE_TAG,GHCR_USER,GHCR_PAT,DEPLOY_PATH,DEPLOY_RUN_ID
           sync: true
           command_timeout: 20m
           script: |
@@ -180,20 +181,43 @@ jobs:
             [ -f docker-compose.yml ] || { echo "缺少 $DEPLOY_PATH/docker-compose.yml" >&2; exit 1; }
             [ -f .env ] || { echo "缺少 $DEPLOY_PATH/.env" >&2; exit 1; }
 
-            cp .env .env.cicd.previous
+            registry_config="$(mktemp -d)"
+            rollback_enabled=false
+            rollback_image=""
 
-            rollback() {
+            finish() {
               status="$?"
               trap - 0
-              echo "部署失败，正在恢复上一版本配置" >&2
-              cp .env.cicd.previous .env
-              docker compose up -d --no-build app || true
+              rm -rf -- "$registry_config"
+
+              if [ "$rollback_enabled" = "true" ]; then
+                echo "部署失败，正在恢复部署前容器镜像" >&2
+                cp .env.cicd.previous .env
+
+                if [ -n "$rollback_image" ]; then
+                  set_env_value UPSTREAMHUB_IMAGE "upstream-hub-local-rollback"
+                  set_env_value UPSTREAMHUB_IMAGE_TAG "run-$DEPLOY_RUN_ID"
+                  docker compose up -d --no-build --pull never app || true
+                else
+                  echo "部署前没有运行中的 app 容器，仅恢复 .env 配置" >&2
+                fi
+              fi
+
               exit "$status"
             }
-            trap rollback 0
+            trap finish 0
 
             if [ -n "${GHCR_PAT:-}" ]; then
-              printf '%s' "$GHCR_PAT" | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+              if ! printf '%s' "$GHCR_PAT" | docker --config "$registry_config" login ghcr.io --username "$GHCR_USER" --password-stdin; then
+                echo "GHCR 登录失败，将尝试匿名拉取；公开镜像请删除 GHCR_PAT，私有镜像请检查 classic PAT 的 read:packages 权限" >&2
+                rm -rf -- "$registry_config"
+                registry_config="$(mktemp -d)"
+              fi
+            fi
+
+            if ! docker --config "$registry_config" pull "$GHCR_IMAGE:$IMAGE_TAG"; then
+              echo "无法拉取 $GHCR_IMAGE:$IMAGE_TAG；当前服务尚未修改" >&2
+              exit 1
             fi
 
             set_env_value() {
@@ -207,13 +231,22 @@ jobs:
               fi
             }
 
+            previous_container_id="$(docker compose ps -q app 2>/dev/null || true)"
+            if [ -n "$previous_container_id" ]; then
+              previous_image_id="$(docker inspect --format '{{.Image}}' "$previous_container_id")"
+              rollback_image="upstream-hub-local-rollback:run-$DEPLOY_RUN_ID"
+              docker tag "$previous_image_id" "$rollback_image"
+            fi
+
+            cp .env .env.cicd.previous
+            rollback_enabled=true
+
             set_env_value UPSTREAMHUB_IMAGE "$GHCR_IMAGE"
             set_env_value UPSTREAMHUB_IMAGE_TAG "$IMAGE_TAG"
 
             docker compose config --quiet
             docker compose config --services | grep -qx app
-            docker compose pull app
-            docker compose up -d --no-build app
+            docker compose up -d --no-build --pull never app
 
             container_id="$(docker compose ps -q app)"
             [ -n "$container_id" ]
@@ -237,8 +270,12 @@ jobs:
             done
 
             docker compose ps app
-            docker logout ghcr.io >/dev/null 2>&1 || true
+            rollback_enabled=false
+            if [ -n "$rollback_image" ]; then
+              docker image rm "$rollback_image" >/dev/null 2>&1 || true
+            fi
             trap - 0
+            rm -rf -- "$registry_config"
             echo "生产环境部署完成：$GHCR_IMAGE:$IMAGE_TAG"
 
       - name: Deployment summary
