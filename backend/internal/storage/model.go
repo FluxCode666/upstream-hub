@@ -242,3 +242,47 @@ type MonitorLog struct {
 }
 
 func (MonitorLog) TableName() string { return "monitor_logs" }
+
+// AlertStatus 告警处理状态。飞书交互卡片"已处理/不处理"按钮回写。
+type AlertStatus string
+
+const (
+	AlertStatusPending AlertStatus = "pending"
+	AlertStatusHandled AlertStatus = "handled"
+	AlertStatusIgnored AlertStatus = "ignored"
+)
+
+// AlertState 一条告警的处理状态记录。
+//
+// 一条告警（balance_low / login_failed 等）发出飞书交互卡片时落一行 pending，
+// 用户在飞书点"已处理/不处理"后回调端点把它更新成 handled / ignored。
+// FeishuMessageID 保留飞书消息 ID，回调时用于就地更新卡片。
+//
+// AlertID 是 UUID，作为卡片按钮 value 回传，是回调主键；业务键 (ChannelID, Event)
+// 用于 Dispatcher 判断"已处理静默窗"内是否跳过后续推送。
+//
+// ChannelID 指上游渠道（storage.Channel），NotifyChannelID 指通知渠道。
+type AlertState struct {
+	ID              uint           `gorm:"primaryKey" json:"id"`
+	AlertID         string         `gorm:"size:64;not null;uniqueIndex" json:"alert_id"`
+	ChannelID       uint           `gorm:"not null;index:idx_alert_chan_event,priority:1" json:"channel_id"`
+	Event           NotificationEvent `gorm:"size:64;not null;index:idx_alert_chan_event,priority:2" json:"event"`
+	NotifyChannelID uint            `json:"notify_channel_id,omitempty"`
+	FeishuMessageID string          `gorm:"size:64" json:"feishu_message_id,omitempty"`
+	Status          AlertStatus     `gorm:"size:16;not null;default:'pending'" json:"status"`
+	HandledBy       string          `gorm:"size:64" json:"handled_by,omitempty"`
+	HandledAt       *time.Time      `json:"handled_at,omitempty"`
+	CreatedAt       time.Time       `gorm:"not null;index" json:"created_at"`
+}
+
+func (AlertState) TableName() string { return "alert_states" }
+
+// AppSetting 通用 KV 设置。Value 存 JSON 字符串。
+// 当前用途：通知模板（key = "notify_templates"，value = map[event]string 的 JSON）。
+type AppSetting struct {
+	Key       string    `gorm:"size:64;not null;uniqueIndex" json:"key"`
+	Value     string    `gorm:"type:text" json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (AppSetting) TableName() string { return "app_settings" }

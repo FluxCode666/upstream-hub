@@ -21,19 +21,26 @@ import (
 
 // Deps 把所有 handler 需要的依赖打包传入。
 type Deps struct {
-	DB         *gorm.DB
-	Cipher     *crypto.Cipher
-	Auth       *auth.Service
-	Channels   *storage.Channels
-	Sessions   *storage.AuthSessions
-	Captchas   *storage.Captchas
-	Notifies   *storage.Notifications
-	Rates      *storage.Rates
-	MonLogs    *storage.MonitorLogs
-	ChannelSvc *channel.Service
-	Monitor    *monitor.Service
-	Dispatcher *notify.Dispatcher
-	Log        *slog.Logger
+	DB          *gorm.DB
+	Cipher      *crypto.Cipher
+	Auth        *auth.Service
+	Channels    *storage.Channels
+	Sessions    *storage.AuthSessions
+	Captchas    *storage.Captchas
+	Notifies    *storage.Notifications
+	Settings    *storage.Settings
+	AlertStates *storage.AlertStates
+	Rates       *storage.Rates
+	MonLogs     *storage.MonitorLogs
+	ChannelSvc  *channel.Service
+	Monitor     *monitor.Service
+	Dispatcher  *notify.Dispatcher
+	Log         *slog.Logger
+
+	// FeishuEncryptKey 飞书回调验签密钥（可空，空则不验签）。
+	FeishuEncryptKey string
+	// FeishuCallbackPath 飞书回调端点路径，默认 /feishu/card-callback。
+	FeishuCallbackPath string
 
 	// Frontend 可选：传入嵌入的前端 dist 文件系统。nil 表示不挂载（本地开发用 vite dev server）。
 	Frontend fs.FS
@@ -54,6 +61,17 @@ func Register(r *gin.Engine, d *Deps) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	// 飞书交互卡片回调：飞书服务器直接调用，不走人工登录鉴权，靠签名验签。
+	// 必须挂在 /api group 之外，否则会被 Auth 中间件拦。
+	// 仅在配了验签密钥时启用（无密钥无法安全开放此端点）。
+	if d.FeishuEncryptKey != "" {
+		path := d.FeishuCallbackPath
+		if path == "" {
+			path = "/feishu/card-callback"
+		}
+		registerFeishuCallback(r, path, d)
+	}
+
 	api := r.Group("/api")
 	if d.Auth != nil {
 		api.Use(d.Auth.Middleware())
@@ -67,6 +85,7 @@ func Register(r *gin.Engine, d *Deps) {
 		registerChannels(api, d)
 		registerCaptchas(api, d)
 		registerNotifications(api, d)
+		registerSettings(api, d)
 		registerRates(api, d)
 		registerMonitorLogs(api, d)
 		registerDashboard(api, d)

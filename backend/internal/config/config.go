@@ -105,6 +105,13 @@ type NotificationsConfig struct {
 	MinChangePct              float64 `mapstructure:"minChangePct"`
 	BalanceLowCooldownMinutes int     `mapstructure:"balanceLowCooldownMinutes"`
 	SendMaxAttempts           int     `mapstructure:"sendMaxAttempts"`
+
+	// FeishuCallbackPath 飞书交互卡片回调端点路径。默认 /feishu/card-callback。
+	// 该端点不走人工登录鉴权，靠飞书签名验签；在应用"事件与回调"里填这个 URL。
+	FeishuCallbackPath string `mapstructure:"feishuCallbackPath"`
+	// FeishuEncryptKey 飞书"事件与回调"配置里的 Encrypt Key，用于校验回调请求签名。
+	// 优先从 UPSTREAMHUB_NOTIFICATIONS_FEISHUENCRYPTKEY 环境变量读取。
+	FeishuEncryptKey string `mapstructure:"feishuEncryptKey"`
 }
 
 type LogConfig struct {
@@ -153,6 +160,8 @@ func Load(path string) (*Config, error) {
 	_ = v.BindEnv("database.password", "UPSTREAMHUB_DATABASE_PASSWORD")
 	_ = v.BindEnv("database.name", "UPSTREAMHUB_DATABASE_NAME")
 	_ = v.BindEnv("database.sslMode", "UPSTREAMHUB_DATABASE_SSLMODE")
+	// 飞书回调验签密钥独立环境变量。
+	_ = v.BindEnv("notifications.feishuEncryptKey", "UPSTREAMHUB_NOTIFICATIONS_FEISHUENCRYPTKEY")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -201,6 +210,8 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("notifications.minChangePct", 0)
 	v.SetDefault("notifications.balanceLowCooldownMinutes", 60)
 	v.SetDefault("notifications.sendMaxAttempts", 3)
+	// 飞书交互卡片回调端点路径 + 验签密钥默认值。
+	v.SetDefault("notifications.feishuCallbackPath", "/feishu/card-callback")
 
 	v.SetDefault("log.level", "info")
 	v.SetDefault("log.format", "text")

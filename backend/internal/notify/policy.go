@@ -1,9 +1,8 @@
 package notify
 
 import (
-	"fmt"
+	"log/slog"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/worryzyy/upstream-hub/internal/storage"
@@ -55,43 +54,52 @@ func (rc RateChange) ChangePctAbove(minPct float64) bool {
 
 // BuildBatchMessage 把多条 RateChange 合并成一条 notify.Message。
 // 当只有 1 条时仍走这个路径，但 Subject / Body 自然退化成单条提醒。
+//
+// 包级函数用默认模板渲染；Dispatcher 实例方法 buildBatchMessage 用注入的用户模板。
+// 保留这个包级入口是为了让 recharge_url_test.go 不依赖 Dispatcher 装配。
 func BuildBatchMessage(channel *storage.Channel, changes []RateChange) Message {
+	return buildBatchMessage(channel, changes, DefaultTemplates(), nil)
+}
+
+func buildBatchMessage(channel *storage.Channel, changes []RateChange, tmpls map[storage.NotificationEvent]string, log *slog.Logger) Message {
 	if len(changes) == 0 {
 		return Message{}
 	}
 	now := time.Now()
-	if len(changes) == 1 {
-		c := changes[0]
-		return Message{
-			Event:     storage.EventRateChanged,
-			ChannelID: channel.ID,
-			ModelName: c.GroupName,
-			Subject:   fmt.Sprintf("【倍率变化提醒】%s · %s", channel.Name, c.GroupName),
-			Body: AppendRechargeURL(fmt.Sprintf(
-				"渠道：%s\n分组倍率：%s 由 %g %s至 %g\n变化时间：%s",
-				channel.Name, c.GroupName, c.OldRatio, arrowFor(c.OldRatio, c.NewRatio), c.NewRatio,
-				now.Format("2006-01-02 15:04"),
-			), channel.RechargeURL),
-		}
+	data := RenderData{
+		ChannelName: channel.Name,
+		Time:        now.Format("2006-01-02 15:04"),
+		Count:       len(changes),
+		Changes:     make([]RenderChangeItem, 0, len(changes)),
 	}
-
-	// 合并多条：subject 简短，body 列出每条。
-	var b strings.Builder
-	fmt.Fprintf(&b, "渠道：%s\n共 %d 个分组倍率变化：\n", channel.Name, len(changes))
 	for _, c := range changes {
-		fmt.Fprintf(&b, "  · %s：%g %s至 %g\n",
-			c.GroupName, c.OldRatio, arrowFor(c.OldRatio, c.NewRatio), c.NewRatio)
+		data.Changes = append(data.Changes, RenderChangeItem{
+			GroupName: c.GroupName, OldRatio: c.OldRatio, NewRatio: c.NewRatio, Arrow: arrowFor(c.OldRatio, c.NewRatio),
+		})
 	}
-	fmt.Fprintf(&b, "时间：%s", now.Format("2006-01-02 15:04"))
-
-	// ModelName 在合并消息里没有单一值；填空，订阅过滤改在 Dispatcher 里按"先按订阅切片再合并"处理。
+	// 单条时也填顶层简写字段，供不写 range 的模板引用
+	if len(changes) == 1 {
+		data.GroupName = changes[0].GroupName
+		data.OldRatio = changes[0].OldRatio
+		data.NewRatio = changes[0].NewRatio
+		data.Arrow = arrowFor(changes[0].OldRatio, changes[0].NewRatio)
+	}
+	subject, body := Render(storage.EventRateChanged, tmpls[storage.EventRateChanged], data, log)
 	return Message{
 		Event:     storage.EventRateChanged,
 		ChannelID: channel.ID,
-		ModelName: "",
-		Subject:   fmt.Sprintf("【倍率变化提醒】%s · %d 个分组变动", channel.Name, len(changes)),
-		Body:      AppendRechargeURL(b.String(), channel.RechargeURL),
+		ModelName: dataModelName(changes),
+		Subject:   subject,
+		Body:      AppendRechargeURL(body, channel.RechargeURL),
 	}
+}
+
+// dataModelName 合并消息 ModelName 填空（订阅过滤在 Dispatcher 里按"先切片再合并"处理）。
+func dataModelName(changes []RateChange) string {
+	if len(changes) == 1 {
+		return changes[0].GroupName
+	}
+	return ""
 }
 
 func arrowFor(oldV, newV float64) string {

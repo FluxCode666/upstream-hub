@@ -13,11 +13,20 @@ import (
 
 // Dispatcher 把单条事件 fan-out 到所有启用的通知渠道，并按 Policy 做去抖。
 type Dispatcher struct {
-	repo     *storage.Notifications
-	cipher   *crypto.Cipher
-	log      *slog.Logger
-	policy   Policy
-	cooldown CooldownStore
+	repo       *storage.Notifications
+	cipher     *crypto.Cipher
+	log        *slog.Logger
+	policy     Policy
+	cooldown   CooldownStore
+	templates  map[storage.NotificationEvent]string
+	alertStates AlertStateStore
+}
+
+// AlertStateStore Dispatcher 用来按 AlertState 做"已处理静默"判断 + 回填飞书 message_id。
+// 生产实现是 *storage.AlertStates。
+type AlertStateStore interface {
+	LatestHandled(channelID uint, event storage.NotificationEvent) (*storage.AlertState, error)
+	SetFeishuMessageID(alertID, messageID string) error
 }
 
 // NewDispatcher 用 *storage.Notifications 作为 CooldownStore 的具体实现，
@@ -33,12 +42,28 @@ func NewDispatcherWithCooldown(repo *storage.Notifications, cipher *crypto.Ciphe
 		policy.SendMaxAttempts = 1
 	}
 	return &Dispatcher{
-		repo:     repo,
-		cipher:   cipher,
-		log:      log,
-		policy:   policy,
-		cooldown: cooldown,
+		repo:      repo,
+		cipher:    cipher,
+		log:       log,
+		policy:    policy,
+		cooldown:  cooldown,
+		templates: DefaultTemplates(),
 	}
+}
+
+// SetTemplates 注入用户覆盖后的通知模板。nil / 空时用默认。
+// 由 main.go 启动时从 Settings 读取一次调用；运行时改模板需重启生效。
+func (d *Dispatcher) SetTemplates(tmpls map[storage.NotificationEvent]string) {
+	if len(tmpls) == 0 {
+		d.templates = DefaultTemplates()
+		return
+	}
+	d.templates = Templates(tmpls)
+}
+
+// SetAlertStates 注入告警状态仓储，用于"已处理静默窗"判断。
+func (d *Dispatcher) SetAlertStates(s AlertStateStore) {
+	d.alertStates = s
 }
 
 // Policy 返回当前策略，便于调用方做条件分支（如是否走批量路径）。
@@ -73,7 +98,15 @@ func (d *Dispatcher) Dispatch(ctx context.Context, msg Message) error {
 	if d.suppress(msg) {
 		return nil
 	}
+	if d.suppressByAlertState(msg) {
+		return nil
+	}
 	return d.fanout(ctx, msg, nil)
+}
+
+// buildBatchMessage 用注入的用户模板渲染 rate_changed 消息。
+func (d *Dispatcher) buildBatchMessage(channel *storage.Channel, changes []RateChange) Message {
+	return buildBatchMessage(channel, changes, d.templates, d.log)
 }
 
 // DispatchRateBatch 把一次扫描收集到的多条 RateChange 按 Policy 合并 / 过滤后推送。
@@ -117,14 +150,14 @@ func (d *Dispatcher) DispatchRateBatch(ctx context.Context, channel *storage.Cha
 		}
 
 		if d.policy.BatchRateChanges {
-			merged := BuildBatchMessage(channel, matching)
+			merged := d.buildBatchMessage(channel, matching)
 			if err := d.sendOne(ctx, &nch, merged); err != nil {
 				errs = append(errs, err)
 			}
 		} else {
 			// 用户显式关掉合并：仍按订阅切片，但逐条发。
 			for _, c := range matching {
-				single := BuildBatchMessage(channel, []RateChange{c})
+				single := d.buildBatchMessage(channel, []RateChange{c})
 				if err := d.sendOne(ctx, &nch, single); err != nil {
 					errs = append(errs, err)
 				}
@@ -183,6 +216,35 @@ func (d *Dispatcher) suppress(msg Message) bool {
 	return !ok
 }
 
+// suppressByAlertState 实现"已处理静默窗"：若该 (channel,event) 最近一条告警被用户
+// 标记为 handled 且未过静默窗（复用 BalanceLowCooldown 时长），跳过本次推送。
+//
+// 语义（对齐计划 2.5）：用户点"已处理"后短期内不再被同源告警骚扰，冷却到期后
+// 恢复按阈值即时告警。BalanceLowCooldown <= 0 时不做该静默（与 cooldown 开关一致）。
+// 仅对有上游 ChannelID 的消息生效；测试发送（ChannelID=0）不受影响。
+func (d *Dispatcher) suppressByAlertState(msg Message) bool {
+	if d.alertStates == nil || msg.ChannelID == 0 {
+		return false
+	}
+	if d.policy.BalanceLowCooldown <= 0 {
+		return false
+	}
+	s, err := d.alertStates.LatestHandled(msg.ChannelID, msg.Event)
+	if err != nil || s == nil || s.HandledAt == nil {
+		return false
+	}
+	silentUntil := s.HandledAt.Add(d.policy.BalanceLowCooldown)
+	if time.Now().Before(silentUntil) {
+		if d.log != nil {
+			d.log.Debug("notification suppressed by handled state",
+				"event", msg.Event, "channel_id", msg.ChannelID,
+				"handled_at", s.HandledAt, "silent_until", silentUntil)
+		}
+		return true
+	}
+	return false
+}
+
 // fanout 广播给所有启用的通知渠道（仅给 Dispatch 用，DispatchRateBatch 自己控订阅切片）。
 //
 // extraFilter 可选：用于在 ParseSubscriptions / AnyMatch 之后做额外裁剪；
@@ -229,7 +291,25 @@ func (d *Dispatcher) sendOne(ctx context.Context, ch *storage.NotificationChanne
 	if sendErr != nil {
 		return fmt.Errorf("send via %s: %w", ch.Name, sendErr)
 	}
+	d.backfillMessageID(msg, ch.ID)
 	return nil
+}
+
+// backfillMessageID 飞书 app 模式发卡片成功后，把飞书返回的 message_id 回填到 AlertState，
+// 供回调端点就地更新卡片。非飞书渠道 / 没有 alert_id 的消息无副作用。
+func (d *Dispatcher) backfillMessageID(msg Message, notifyChannelID uint) {
+	if d.alertStates == nil || msg.Extra == nil {
+		return
+	}
+	alertID, _ := msg.Extra["alert_id"].(string)
+	messageID, _ := msg.Extra["feishu_message_id"].(string)
+	if alertID == "" || messageID == "" {
+		return
+	}
+	if err := d.alertStates.SetFeishuMessageID(alertID, messageID); err != nil && d.log != nil {
+		d.log.Warn("backfill feishu message_id", "alert_id", alertID, "err", err)
+	}
+	_ = notifyChannelID // 保留语义：message_id 与具体通知渠道绑定；当前 AlertState 全局存一份。
 }
 
 // sendWithRetry 指数退避重试发送。
