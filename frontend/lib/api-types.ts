@@ -158,3 +158,11 @@ export interface BalanceTrendPoint {
   day: string
   balance: number
 }
+
+// 通知模板：事件 → 模板字符串。空字符串表示用默认。
+export type NotifyTemplates = Record<NotificationEvent, string>
+
+export interface NotifyTemplatesResponse {
+  current: NotifyTemplates
+  defaults: NotifyTemplates
+}

@@ -86,6 +86,8 @@ func main() {
 	authSessions := storage.NewAuthSessions(db)
 	captchas := storage.NewCaptchas(db)
 	notifies := storage.NewNotifications(db)
+	settings := storage.NewSettings(db)
+	alertStates := storage.NewAlertStates(db)
 	rates := storage.NewRates(db)
 	monLogs := storage.NewMonitorLogs(db)
 
@@ -96,7 +98,16 @@ func main() {
 		BalanceLowCooldown: time.Duration(cfg.Notifications.BalanceLowCooldownMinutes) * time.Minute,
 		SendMaxAttempts:    cfg.Notifications.SendMaxAttempts,
 	})
-	monitorSvc := monitor.NewService(channels, rates, monLogs, channelSvc, dispatcher, log)
+	// 注入用户通知模板 + 告警状态仓储（冷却联动静默 + 飞书 message_id 回填）。
+	notifyTmpls, err := settings.GetNotifyTemplates()
+	if err != nil {
+		log.Warn("load notify templates, using defaults", "err", err)
+		notifyTmpls = nil
+	}
+	dispatcher.SetTemplates(notifyTmpls)
+	dispatcher.SetAlertStates(alertStates)
+
+	monitorSvc := monitor.NewService(channels, rates, monLogs, channelSvc, dispatcher, alertStates, notify.Templates(notifyTmpls), log)
 
 	sch := scheduler.New(cfg.Scheduler, monitorSvc, monLogs, rates, notifies, log)
 	if err := sch.Start(); err != nil {
@@ -123,20 +134,24 @@ func main() {
 	}
 
 	api.Register(router, &api.Deps{
-		DB:         db,
-		Cipher:     cipher,
-		Auth:       authSvc,
-		Channels:   channels,
-		Sessions:   authSessions,
-		Captchas:   captchas,
-		Notifies:   notifies,
-		Rates:      rates,
-		MonLogs:    monLogs,
-		ChannelSvc: channelSvc,
-		Monitor:    monitorSvc,
-		Dispatcher: dispatcher,
-		Log:        log,
-		Frontend:   frontendFS,
+		DB:              db,
+		Cipher:          cipher,
+		Auth:            authSvc,
+		Channels:        channels,
+		Sessions:        authSessions,
+		Captchas:        captchas,
+		Notifies:        notifies,
+		Settings:        settings,
+		AlertStates:     alertStates,
+		Rates:           rates,
+		MonLogs:         monLogs,
+		ChannelSvc:      channelSvc,
+		Monitor:         monitorSvc,
+		Dispatcher:      dispatcher,
+		Log:             log,
+		FeishuEncryptKey: cfg.Notifications.FeishuEncryptKey,
+		FeishuCallbackPath: cfg.Notifications.FeishuCallbackPath,
+		Frontend:        frontendFS,
 	})
 
 	srv := &http.Server{

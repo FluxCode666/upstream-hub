@@ -10,6 +10,7 @@ import type {
   DashboardSummary,
   NotificationChannel,
   NotificationLog,
+  NotifyTemplatesResponse,
   RateChangeLog,
   RateSnapshot,
 } from "@/lib/api-types"
@@ -172,4 +173,8 @@ export function useNotificationLogs(limit = 20) {
 
 export function useCaptchaConfigs() {
   return useApi<CaptchaConfig[]>("/captcha-configs")
+}
+
+export function useNotifyTemplates() {
+  return useApi<NotifyTemplatesResponse>("/settings/notify-templates")
 }

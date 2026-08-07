@@ -3,6 +3,7 @@ package monitor
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"time"
@@ -21,6 +22,8 @@ type Service struct {
 	monitorLogs *storage.MonitorLogs
 	channelSvc  *channel.Service
 	dispatcher  *notify.Dispatcher
+	alertStates *storage.AlertStates
+	templates   map[storage.NotificationEvent]string
 	log         *slog.Logger
 }
 
@@ -30,6 +33,8 @@ func NewService(
 	monitorLogs *storage.MonitorLogs,
 	channelSvc *channel.Service,
 	dispatcher *notify.Dispatcher,
+	alertStates *storage.AlertStates,
+	templates map[storage.NotificationEvent]string,
 	log *slog.Logger,
 ) *Service {
 	return &Service{
@@ -38,6 +43,8 @@ func NewService(
 		monitorLogs: monitorLogs,
 		channelSvc:  channelSvc,
 		dispatcher:  dispatcher,
+		alertStates: alertStates,
+		templates:   templates,
 		log:         log,
 	}
 }
@@ -114,16 +121,14 @@ func (s *Service) RefreshBalance(ctx context.Context, c *storage.Channel) error 
 		map[string]any{"balance": res.Balance})
 
 	if c.BalanceThreshold > 0 && res.Balance < c.BalanceThreshold {
-		body := notify.AppendRechargeURL(
-			fmt.Sprintf("当前余额: %.4f，阈值: %.4f", res.Balance, c.BalanceThreshold),
-			c.RechargeURL,
-		)
-		_ = s.dispatcher.Dispatch(ctx, notify.Message{
-			Event:     storage.EventBalanceLow,
-			ChannelID: c.ID,
-			Subject:   fmt.Sprintf("[upstream-hub] %s 余额低于阈值", c.Name),
-			Body:      body,
-		})
+		data := notify.RenderData{
+			ChannelName: c.Name,
+			Balance:      res.Balance,
+			Threshold:    c.BalanceThreshold,
+		}
+		subject, body := notify.Render(storage.EventBalanceLow, s.templates[storage.EventBalanceLow], data, s.log)
+		body = notify.AppendRechargeURL(body, c.RechargeURL)
+		s.dispatchAlert(ctx, c, storage.EventBalanceLow, subject, body)
 	}
 	return nil
 }
@@ -220,13 +225,64 @@ func (s *Service) prepare(ctx context.Context, c *storage.Channel) (*connector.C
 	return resolved, conn, session, nil
 }
 
-func (s *Service) notifyError(ctx context.Context, c *storage.Channel, event storage.NotificationEvent, subject string, err error) {
-	_ = s.dispatcher.Dispatch(ctx, notify.Message{
+func (s *Service) notifyError(ctx context.Context, c *storage.Channel, event storage.NotificationEvent, title string, err error) {
+	data := notify.RenderData{
+		ChannelName: c.Name,
+		Title:        title,
+		Error:        err.Error(),
+	}
+	subject, body := notify.Render(event, s.templates[event], data, s.log)
+	body = notify.AppendRechargeURL(body, c.RechargeURL)
+	s.dispatchAlert(ctx, c, event, subject, body)
+}
+
+// dispatchAlert 发一条带告警 ID 的通知，并落库 AlertState（pending）。
+// alertID 写进 msg.Extra，飞书 app 卡片的按钮 value 回带它，回调端点据此定位记录。
+// 已处理静默窗内的告警会被 Dispatcher 跳过（见 dispatcher.suppressByAlertState），
+// 此时不再落库新记录，避免静默期间堆积无意义 pending。
+func (s *Service) dispatchAlert(ctx context.Context, c *storage.Channel, event storage.NotificationEvent, subject, body string) {
+	alertID := newAlertID()
+	msg := notify.Message{
 		Event:     event,
 		ChannelID: c.ID,
-		Subject:   fmt.Sprintf("[upstream-hub] %s %s", c.Name, subject),
-		Body:      notify.AppendRechargeURL(err.Error(), c.RechargeURL),
-	})
+		Subject:   subject,
+		Body:      body,
+		Extra: map[string]any{
+			"alert_id":   alertID,
+			"channel_id": c.ID,
+		},
+	}
+	if err := s.dispatcher.Dispatch(ctx, msg); err != nil && s.log != nil {
+		s.log.Warn("dispatch alert", "event", event, "channel", c.Name, "err", err)
+	}
+	// 落库 pending：飞书 app 卡片成功发送后，Dispatcher 会把飞书 message_id 回填到该记录。
+	// 静默窗内 Dispatch 跳过的情况，这条 pending 没有卡片可点，无副作用（LatestHandled 只查
+	// handled 状态，pending 不影响静默判断）；保留落库以保持链路简单。
+	s.recordAlertState(alertID, c.ID, event)
+}
+
+// recordAlertState 落库一条 pending 告警状态。失败仅记日志，不阻断告警链路。
+func (s *Service) recordAlertState(alertID string, channelID uint, event storage.NotificationEvent) {
+	if s.alertStates == nil {
+		return
+	}
+	if err := s.alertStates.Create(&storage.AlertState{
+		AlertID:   alertID,
+		ChannelID: channelID,
+		Event:     event,
+		Status:    storage.AlertStatusPending,
+	}); err != nil && s.log != nil {
+		s.log.Warn("create alert state", "alert_id", alertID, "err", err)
+	}
+}
+
+// newAlertID 生成一个 UUIDv4 字符串（不引外部依赖，用 crypto/rand）。
+func newAlertID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func errString(err error) string {

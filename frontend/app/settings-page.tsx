@@ -1,5 +1,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useAuth } from "@/lib/auth-context"
+import { NotifyTemplateCard } from "@/components/monitor/notify-template-card"
 
 export default function SettingsPage() {
   const { username } = useAuth()
@@ -78,6 +79,8 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <NotifyTemplateCard />
     </section>
   )
 }

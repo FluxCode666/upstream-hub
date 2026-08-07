@@ -58,6 +58,12 @@ notifications:
   # 单条通知发送失败时最多重试次数（含首次）。1 = 不重试。
   # 退避：1s / 2s / 4s … 上限 30s。
   sendMaxAttempts: 3
+  # 飞书交互卡片（"已处理/不处理"按钮）回调端点。
+  # 在飞书应用"事件与回调"里把卡片回调 URL 填成 https://<server.baseURL> + 这个路径。
+  feishuCallbackPath: "/feishu/card-callback"
+  # 飞书应用"事件与回调"配置里的 Encrypt Key，用于校验回调请求签名。
+  # 也可用 UPSTREAMHUB_NOTIFICATIONS_FEISHUENCRYPTKEY 环境变量覆盖。留空则不验签（仅开发用）。
+  feishuEncryptKey: ""
 
 log:
   level: info          # debug | info | warn | error

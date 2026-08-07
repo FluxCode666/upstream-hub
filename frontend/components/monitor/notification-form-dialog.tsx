@@ -58,6 +58,11 @@ interface ConfigState {
   // wecom / dingtalk / feishu
   webhook_url: string
   secret: string
+  // feishu app mode
+  feishu_mode: "webhook" | "app"
+  app_id: string
+  app_secret: string
+  chat_id: string
 }
 
 interface SubRow {
@@ -90,6 +95,10 @@ function emptyConfig(): ConfigState {
     use_tls: false,
     webhook_url: "",
     secret: "",
+    feishu_mode: "webhook",
+    app_id: "",
+    app_secret: "",
+    chat_id: "",
   }
 }
 
@@ -157,8 +166,18 @@ function buildConfigByType(type: NotificationChannelType, cfg: ConfigState): str
     case "wecom":
       return JSON.stringify({ webhook_url: cfg.webhook_url })
     case "dingtalk":
+      return JSON.stringify({ webhook_url: cfg.webhook_url, ...(cfg.secret ? { secret: cfg.secret } : {}) })
     case "feishu": {
-      const body: Record<string, unknown> = { webhook_url: cfg.webhook_url }
+      if (cfg.feishu_mode === "app") {
+        const body: Record<string, unknown> = {
+          mode: "app",
+          app_id: cfg.app_id,
+          app_secret: cfg.app_secret,
+          chat_id: cfg.chat_id,
+        }
+        return JSON.stringify(body)
+      }
+      const body: Record<string, unknown> = { mode: "webhook", webhook_url: cfg.webhook_url }
       if (cfg.secret) body.secret = cfg.secret
       return JSON.stringify(body)
     }
@@ -235,6 +254,10 @@ export function NotificationFormDialog({
             return !!(form.cfg.host || form.cfg.from || form.cfg.to)
           case "bark":
             return !!form.cfg.url
+          case "feishu":
+            return form.cfg.feishu_mode === "app"
+              ? !!(form.cfg.app_id || form.cfg.app_secret || form.cfg.chat_id)
+              : !!form.cfg.webhook_url
           default:
             return !!form.cfg.webhook_url
         }
@@ -620,12 +643,106 @@ function ConfigFields({ type, cfg, updateCfg, disabled, isEdit }: ConfigFieldsPr
     )
   }
 
-  // wecom / dingtalk / feishu
-  const supportsSecret = type === "dingtalk" || type === "feishu"
+  if (type === "feishu") {
+    const isApp = cfg.feishu_mode === "app"
+    return (
+      <div className="space-y-2 rounded-lg border border-border p-3">
+        <p className="text-xs font-medium text-muted-foreground">飞书</p>
+        <RadioGroup
+          value={cfg.feishu_mode}
+          onValueChange={(v) => updateCfg({ feishu_mode: v as "webhook" | "app" })}
+          className="flex gap-4"
+          disabled={disabled}
+        >
+          <div className="flex items-center gap-1.5">
+            <RadioGroupItem value="webhook" id="fs-webhook" />
+            <Label htmlFor="fs-webhook" className="text-xs font-normal">
+              群机器人 Webhook（纯文本）
+            </Label>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <RadioGroupItem value="app" id="fs-app" />
+            <Label htmlFor="fs-app" className="text-xs font-normal">
+              自建应用（交互卡片 + 已处理/不处理按钮）
+            </Label>
+          </div>
+        </RadioGroup>
+
+        {isApp ? (
+          <>
+            <div className="space-y-1.5">
+              <Label htmlFor="fs-appid">App ID</Label>
+              <Input
+                id="fs-appid"
+                placeholder="cli_xxxxxx"
+                value={cfg.app_id}
+                onChange={(e) => updateCfg({ app_id: e.target.value })}
+                required={!isEdit}
+                disabled={disabled}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="fs-secret">App Secret</Label>
+              <Input
+                id="fs-secret"
+                type="password"
+                value={cfg.app_secret}
+                onChange={(e) => updateCfg({ app_secret: e.target.value })}
+                required={!isEdit}
+                disabled={disabled}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="fs-chatid">Chat ID（目标群）</Label>
+              <Input
+                id="fs-chatid"
+                placeholder="oc_xxxxxxxx"
+                value={cfg.chat_id}
+                onChange={(e) => updateCfg({ chat_id: e.target.value })}
+                required={!isEdit}
+                disabled={disabled}
+              />
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              先把机器人拉入目标群，再调飞书 API GET /open-apis/im/v1/chats 取群的 chat_id。
+              回调端点需在 config 配 FeishuEncryptKey 并把卡片回调 URL 填到飞书应用后台。
+            </p>
+          </>
+        ) : (
+          <>
+            <div className="space-y-1.5">
+              <Label htmlFor="wb-url">Webhook URL</Label>
+              <Input
+                id="wb-url"
+                value={cfg.webhook_url}
+                onChange={(e) => updateCfg({ webhook_url: e.target.value })}
+                required={!isEdit}
+                disabled={disabled}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="wb-secret">Secret (可选, HMAC 签名)</Label>
+              <Input
+                id="wb-secret"
+                type="password"
+                value={cfg.secret}
+                onChange={(e) => updateCfg({ secret: e.target.value })}
+                disabled={disabled}
+              />
+            </div>
+          </>
+        )}
+        {hint}
+      </div>
+    )
+  }
+
+  // wecom / dingtalk
+  const supportsSecret = type === "dingtalk"
   return (
     <div className="space-y-2 rounded-lg border border-border p-3">
       <p className="text-xs font-medium text-muted-foreground">
-        {type === "wecom" ? "企业微信" : type === "dingtalk" ? "钉钉" : "飞书"}
+        {type === "wecom" ? "企业微信" : "钉钉"}
       </p>
       <div className="space-y-1.5">
         <Label htmlFor="wb-url">Webhook URL</Label>
