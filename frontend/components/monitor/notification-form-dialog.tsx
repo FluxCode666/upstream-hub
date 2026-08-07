@@ -62,7 +62,7 @@ interface ConfigState {
   feishu_mode: "webhook" | "app"
   app_id: string
   app_secret: string
-  chat_id: string
+  // chat_id 复用：telegram 群 ID 与 feishu app 目标群 ID 共用此字段（同一渠道只属一种类型）
 }
 
 interface SubRow {
@@ -98,7 +98,6 @@ function emptyConfig(): ConfigState {
     feishu_mode: "webhook",
     app_id: "",
     app_secret: "",
-    chat_id: "",
   }
 }
 
