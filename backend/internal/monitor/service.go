@@ -238,8 +238,10 @@ func (s *Service) notifyError(ctx context.Context, c *storage.Channel, event sto
 
 // dispatchAlert 发一条带告警 ID 的通知，并落库 AlertState（pending）。
 // alertID 写进 msg.Extra，飞书 app 卡片的按钮 value 回带它，回调端点据此定位记录。
+// 落库在 Dispatch 之前：飞书 Send 成功后 backfillMessageID 会 UPDATE 这条记录回填
+// message_id，行必须先存在 UPDATE 才能命中（详见下方注释）。
 // 已处理静默窗内的告警会被 Dispatcher 跳过（见 dispatcher.suppressByAlertState），
-// 此时不再落库新记录，避免静默期间堆积无意义 pending。
+// 此时该 alert 只落了 pending、无卡片可点；pending 不影响 LatestHandled 的静默判断。
 func (s *Service) dispatchAlert(ctx context.Context, c *storage.Channel, event storage.NotificationEvent, subject, body string) {
 	alertID := newAlertID()
 	msg := notify.Message{
@@ -252,13 +254,18 @@ func (s *Service) dispatchAlert(ctx context.Context, c *storage.Channel, event s
 			"channel_id": c.ID,
 		},
 	}
+	// 先落库 pending 行，再发通知。
+	// Dispatch 同步执行：飞书 app Send 成功后，sendOne → backfillMessageID 会做
+	// UPDATE alert_states SET feishu_message_id=? WHERE alert_id=?。行必须先存在，
+	// UPDATE 才能命中。原顺序（先 Dispatch 后 Create）导致 UPDATE 0 行、message_id
+	// 永远回填不到行里，飞书回调端点拿不到 message_id 就无法就地更新卡片。
+	// 静默窗内 Dispatch 跳过的情况，这条 pending 没有卡片可点，无副作用（LatestHandled
+	// 只查 handled 状态，pending 不影响静默判断）。
+	s.recordAlertState(alertID, c.ID, event)
+
 	if err := s.dispatcher.Dispatch(ctx, msg); err != nil && s.log != nil {
 		s.log.Warn("dispatch alert", "event", event, "channel", c.Name, "err", err)
 	}
-	// 落库 pending：飞书 app 卡片成功发送后，Dispatcher 会把飞书 message_id 回填到该记录。
-	// 静默窗内 Dispatch 跳过的情况，这条 pending 没有卡片可点，无副作用（LatestHandled 只查
-	// handled 状态，pending 不影响静默判断）；保留落库以保持链路简单。
-	s.recordAlertState(alertID, c.ID, event)
 }
 
 // recordAlertState 落库一条 pending 告警状态。失败仅记日志，不阻断告警链路。
