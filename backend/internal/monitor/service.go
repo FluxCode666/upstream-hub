@@ -261,15 +261,16 @@ func (s *Service) dispatchAlert(ctx context.Context, c *storage.Channel, event s
 	// 永远回填不到行里，飞书回调端点拿不到 message_id 就无法就地更新卡片。
 	// 静默窗内 Dispatch 跳过的情况，这条 pending 没有卡片可点，无副作用（LatestHandled
 	// 只查 handled 状态，pending 不影响静默判断）。
-	s.recordAlertState(alertID, c.ID, event)
+	s.recordAlertState(alertID, c.ID, event, subject, body)
 
 	if err := s.dispatcher.Dispatch(ctx, msg); err != nil && s.log != nil {
 		s.log.Warn("dispatch alert", "event", event, "channel", c.Name, "err", err)
 	}
 }
 
-// recordAlertState 落库一条 pending 告警状态。失败仅记日志，不阻断告警链路。
-func (s *Service) recordAlertState(alertID string, channelID uint, event storage.NotificationEvent) {
+// recordAlertState 落库一条 pending 告警状态，并把通知原文 Subject/Body 一并存下，
+// 供飞书回调端点点击后重建带正文的终态卡片。失败仅记日志，不阻断告警链路。
+func (s *Service) recordAlertState(alertID string, channelID uint, event storage.NotificationEvent, subject, body string) {
 	if s.alertStates == nil {
 		return
 	}
@@ -277,6 +278,8 @@ func (s *Service) recordAlertState(alertID string, channelID uint, event storage
 		AlertID:   alertID,
 		ChannelID: channelID,
 		Event:     event,
+		Subject:   subject,
+		Body:      body,
 		Status:    storage.AlertStatusPending,
 	}); err != nil && s.log != nil {
 		s.log.Warn("create alert state", "alert_id", alertID, "err", err)

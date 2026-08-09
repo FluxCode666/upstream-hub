@@ -183,7 +183,7 @@ func buildFeishuCard(msg Message) map[string]any {
 		"elements": []any{
 			map[string]any{
 				"tag":  "div",
-				"text": map[string]string{"tag": "lark_md", "content": escapeFeishuMd(msg.Body)},
+				"text": map[string]string{"tag": "lark_md", "content": EscapeFeishuMd(msg.Body)},
 			},
 			map[string]any{
 				"tag": "action",
@@ -196,8 +196,9 @@ func buildFeishuCard(msg Message) map[string]any {
 	}
 }
 
-// escapeFeishuMd 把正文的 < > & 转义，避免 lark_md 注入。
-func escapeFeishuMd(s string) string {
+// EscapeFeishuMd 把正文的 < > & 转义，避免 lark_md 注入。
+// 导出供 api 包构造终态卡片时复用（与发送卡片保持一致的转义）。
+func EscapeFeishuMd(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")

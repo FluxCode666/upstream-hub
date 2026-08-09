@@ -261,6 +261,9 @@ const (
 // AlertID 是 UUID，作为卡片按钮 value 回传，是回调主键；业务键 (ChannelID, Event)
 // 用于 Dispatcher 判断"已处理静默窗"内是否跳过后续推送。
 //
+// Subject/Body 存发送时渲染好的通知原文（Body 已含充值链接），供飞书回调端点
+// 点击后重建带正文的终态卡片（processFeishuCardAction → buildFeishuResolvedCard）。
+//
 // ChannelID 指上游渠道（storage.Channel），NotifyChannelID 指通知渠道。
 type AlertState struct {
 	ID              uint           `gorm:"primaryKey" json:"id"`
@@ -269,6 +272,8 @@ type AlertState struct {
 	Event           NotificationEvent `gorm:"size:64;not null;index:idx_alert_chan_event,priority:2" json:"event"`
 	NotifyChannelID uint            `json:"notify_channel_id,omitempty"`
 	FeishuMessageID string          `gorm:"size:64" json:"feishu_message_id,omitempty"`
+	Subject         string          `gorm:"type:text" json:"subject,omitempty"`
+	Body            string          `gorm:"type:text" json:"body,omitempty"`
 	Status          AlertStatus     `gorm:"size:16;not null;default:'pending'" json:"status"`
 	HandledBy       string          `gorm:"size:64" json:"handled_by,omitempty"`
 	HandledAt       *time.Time      `json:"handled_at,omitempty"`

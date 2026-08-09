@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/worryzyy/upstream-hub/internal/notify"
 	"github.com/worryzyy/upstream-hub/internal/storage"
 )
 
@@ -208,7 +209,7 @@ func processFeishuCardAction(ev *feishuCardEvent, d *Deps) (string, map[string]a
 		d.Log.Info("feishu respond resolved card", "alert_id", alertID,
 			"message_id", updated.FeishuMessageID, "status", status)
 	}
-	return statusToast(status), buildFeishuResolvedCard(string(event), status)
+	return statusToast(status), buildFeishuResolvedCard(st.Subject, st.Body, string(event), status)
 }
 
 // feishuDecrypt 解密飞书加密模式的请求体。
@@ -332,30 +333,45 @@ func statusLabel(s storage.AlertStatus) string {
 // 飞书报 200672「错误的响应体格式」。详见
 // open.feishu.cn/document/.../feishu-cards/handle-card-callbacks 方式一。
 //
-// AlertState 不存原始 subject/body，这里用 event 标识告警 + 终态文案组成卡片内容。
-func buildFeishuResolvedCard(event string, status storage.AlertStatus) map[string]any {
+// 卡片结构对齐 notify.buildFeishuCard（发送卡片）：header=subject 标题，elements[0]=body
+// 正文（落库的原文，已含充值链接，经 EscapeFeishuMd 转义），再把按钮替换为终态状态行。
+// 这样用户点击后仍能看到告警细节，而不是只剩一句"已处理"。
+func buildFeishuResolvedCard(subject, body, event string, status storage.AlertStatus) map[string]any {
 	label := statusLabel(status)
 	badge := "✅"
 	if status == storage.AlertStatusIgnored {
 		badge = "🚫"
 	}
-	content := badge + " " + label
+	elements := []any{}
+	// 正文行：复刻发送卡片，展示告警细节（余额/错误 + 充值链接）。
+	if body != "" {
+		elements = append(elements, map[string]any{
+			"tag":  "div",
+			"text": map[string]string{"tag": "lark_md", "content": notify.EscapeFeishuMd(body)},
+		})
+	}
+	// 终态状态行：替代原按钮组，表明处理结果。
+	statusText := badge + " " + label
 	if event != "" {
-		content += "（" + event + "）"
+		statusText += "（" + event + "）"
+	}
+	elements = append(elements, map[string]any{
+		"tag":  "div",
+		"text": map[string]string{"tag": "lark_md", "content": statusText},
+	})
+	// subject 为空时 header 兜底，避免空标题。
+	title := subject
+	if title == "" {
+		title = "告警已处理"
 	}
 	return map[string]any{
 		"type": "raw",
 		"data": map[string]any{
 			"config": map[string]any{"wide_screen_mode": true},
 			"header": map[string]any{
-				"title": map[string]string{"tag": "plain_text", "content": "告警已处理"},
+				"title": map[string]string{"tag": "plain_text", "content": title},
 			},
-			"elements": []any{
-				map[string]any{
-					"tag":  "div",
-					"text": map[string]string{"tag": "lark_md", "content": content},
-				},
-			},
+			"elements": elements,
 		},
 	}
 }

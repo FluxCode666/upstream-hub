@@ -218,18 +218,22 @@ func TestFeishuCardEvent_LegacyTopLevelParse(t *testing.T) {
 
 // TestBuildFeishuResolvedCard 终态卡片需符合飞书 2.0 card.action.trigger 回调响应
 // 的 card 字段格式：外层 {"type":"raw","data":{卡片JSON}}，data 下才是 config/header/elements。
-// 不含按钮 action，elements 含终态文案。早期缺 type/data 包装层飞书报 200672。
+// 卡片对齐发送卡片结构：header=subject，elements[0]=body 正文，elements[1]=终态状态行，
+// 无按钮 action。早期缺 type/data 包装层飞书报 200672。
 func TestBuildFeishuResolvedCard(t *testing.T) {
 	cases := []struct {
-		status storage.AlertStatus
-		event  string
+		status    storage.AlertStatus
+		subject   string
+		body      string
+		event     string
 		wantBadge string
+		wantBody  string // body 里期望出现在终态卡片的片段
 	}{
-		{storage.AlertStatusHandled, "balance_low", "✅"},
-		{storage.AlertStatusIgnored, "rate_limit", "🚫"},
+		{storage.AlertStatusHandled, "余额不足告警", "渠道 A 余额 1.23 低于阈值 10\n充值链接：https://x", "balance_low", "✅", "1.23"},
+		{storage.AlertStatusIgnored, "登录失败", "渠道 B 登录错误 timeout", "rate_limit", "🚫", "timeout"},
 	}
 	for _, tc := range cases {
-		card := buildFeishuResolvedCard(tc.event, tc.status)
+		card := buildFeishuResolvedCard(tc.subject, tc.body, tc.event, tc.status)
 		// 外层必须是 type=raw 包装，卡片 JSON 在 data 下。
 		if card["type"] != "raw" {
 			t.Fatalf("card.type = %v, want raw (missing raw wrapper → feishu 200672)", card["type"])
@@ -241,21 +245,42 @@ func TestBuildFeishuResolvedCard(t *testing.T) {
 		if data["config"] == nil || data["header"] == nil || data["elements"] == nil {
 			t.Fatalf("card.data missing config/header/elements: %v", data)
 		}
-		elems, ok := data["elements"].([]any)
-		if !ok || len(elems) == 0 {
-			t.Fatalf("elements not non-empty slice: %T", data["elements"])
+		// header 用 subject。
+		hdr, _ := data["header"].(map[string]any)
+		title, _ := hdr["title"].(map[string]string)
+		if title["content"] != tc.subject {
+			t.Fatalf("header title = %q, want subject %q", title["content"], tc.subject)
 		}
-		// 第一个 element 应为 div + 含 badge 文案
-		div, ok := elems[0].(map[string]any)
-		if !ok || div["tag"] != "div" {
+		elems, ok := data["elements"].([]any)
+		if !ok || len(elems) < 2 {
+			t.Fatalf("elements want >=2 (body+status), got %d: %v", len(elems), elems)
+		}
+		// 第一个 element：body 正文行，含原文字段（< > & 经转义后仍可识别片段）。
+		bodyDiv, ok := elems[0].(map[string]any)
+		if !ok || bodyDiv["tag"] != "div" {
 			t.Fatalf("first element not div: %v", elems[0])
 		}
-		text, _ := div["text"].(map[string]string)
-		if !strings.Contains(text["content"], tc.wantBadge) {
-			t.Fatalf("card content %q missing badge %q", text["content"], tc.wantBadge)
+		bodyText, _ := bodyDiv["text"].(map[string]string)
+		if !strings.Contains(bodyText["content"], tc.wantBody) {
+			t.Fatalf("body content %q missing original body fragment %q", bodyText["content"], tc.wantBody)
 		}
-		if !strings.Contains(text["content"], tc.event) {
-			t.Fatalf("card content %q missing event %q", text["content"], tc.event)
+		// 第二个 element：终态状态行，含 badge + event。
+		statusDiv, ok := elems[1].(map[string]any)
+		if !ok || statusDiv["tag"] != "div" {
+			t.Fatalf("second element not div: %v", elems[1])
+		}
+		statusText, _ := statusDiv["text"].(map[string]string)
+		if !strings.Contains(statusText["content"], tc.wantBadge) {
+			t.Fatalf("status content %q missing badge %q", statusText["content"], tc.wantBadge)
+		}
+		if !strings.Contains(statusText["content"], tc.event) {
+			t.Fatalf("status content %q missing event %q", statusText["content"], tc.event)
+		}
+		// 终态卡片不应含按钮 action。
+		for _, e := range elems {
+			if d, _ := e.(map[string]any); d != nil && d["tag"] == "action" {
+				t.Fatalf("resolved card should have no action button, got %v", d)
+			}
 		}
 	}
 }
