@@ -195,33 +195,57 @@ func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) strin
 
 	// 就地更新卡片（best-effort，失败不影响状态已落库）。
 	if updated.FeishuMessageID != "" {
+		if d.Log != nil {
+			d.Log.Info("feishu try update card", "alert_id", alertID,
+				"message_id", updated.FeishuMessageID, "status", status)
+		}
 		updateFeishuCardAsync(c, d, updated)
+	} else if d.Log != nil {
+		d.Log.Info("feishu skip update card (no message_id)", "alert_id", alertID)
 	}
 	return statusToast(status)
 }
 
 // updateFeishuCardAsync 用通知渠道配置构造飞书 app client 更新卡片。
 // here 用同步：回调响应里返回新卡片内容也可，但 PATCH 更新整张卡片更直观。
+// 各分支均记日志，便于线上定位"卡片不更新"卡在哪一步。
 func updateFeishuCardAsync(c *gin.Context, d *Deps, st *storage.AlertState) {
 	ch, err := d.Notifies.FindChannel(st.NotifyChannelID)
 	if err != nil || ch == nil {
 		// NotifyChannelID 未落库时（旧路径）兜底：尝试所有已启用飞书渠道
+		if d.Log != nil {
+			d.Log.Info("feishu update card: channel not found, fallback",
+				"notify_channel_id", st.NotifyChannelID, "err", err)
+		}
 		ch = findFeishuAppChannel(d)
 		if ch == nil {
+			if d.Log != nil {
+				d.Log.Warn("feishu update card: no enabled feishu channel")
+			}
 			return
 		}
 	}
 	cfgJSON, err := d.Cipher.Decrypt(ch.ConfigCipher)
 	if err != nil {
+		if d.Log != nil {
+			d.Log.Warn("feishu update card: decrypt config", "channel", ch.ID, "err", err)
+		}
 		return
 	}
 	app, err := notify.NewFeishuAppFromConfig(cfgJSON)
 	if err != nil {
+		if d.Log != nil {
+			d.Log.Warn("feishu update card: new app", "channel", ch.ID, "err", err)
+		}
 		return
 	}
 	statusText := "✅ 已由 " + st.HandledBy + " 标记为" + statusLabel(st.Status)
-	if err := app.UpdateCard(c.Request.Context(), st.FeishuMessageID, statusText); err != nil && d.Log != nil {
-		d.Log.Warn("feishu update card", "message_id", st.FeishuMessageID, "err", err)
+	if err := app.UpdateCard(c.Request.Context(), st.FeishuMessageID, statusText); err != nil {
+		if d.Log != nil {
+			d.Log.Warn("feishu update card", "message_id", st.FeishuMessageID, "err", err)
+		}
+	} else if d.Log != nil {
+		d.Log.Info("feishu update card ok", "message_id", st.FeishuMessageID, "channel", ch.ID)
 	}
 }
 
