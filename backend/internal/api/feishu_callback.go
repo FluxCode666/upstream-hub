@@ -57,7 +57,14 @@ func handleFeishuCallback(c *gin.Context, d *Deps) {
 		plain, derr := feishuDecrypt(enc.Encrypt, d.FeishuEncryptKey)
 		if derr != nil {
 			if d.Log != nil {
-				d.Log.Warn("feishu callback decrypt", "err", derr)
+				// 诊断：解密失败时记录 encrypt 字段指纹，定位是 base64 损坏、明文误判还是密钥不符。
+				d.Log.Warn("feishu callback decrypt",
+					"err", derr,
+					"body_len", len(body),
+					"encrypt_len", len(enc.Encrypt),
+					"encrypt_head", headStr(enc.Encrypt, 64),
+					"has_sig", c.GetHeader("X-Lark-Signature") != "",
+					"ua", c.GetHeader("User-Agent"))
 			}
 			c.JSON(http.StatusOK, gin.H{"code": 1, "msg": "decrypt fail"})
 			return
@@ -281,6 +288,15 @@ func abs(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// headStr 返回 s 的前 n 字符的可视化形式（非可打印字符用 %q 风格转义），
+// 供日志诊断 encrypt 字段开头是否符合 base64 字符集。
+func headStr(s string, n int) string {
+	if len(s) > n {
+		s = s[:n]
+	}
+	return fmt.Sprintf("%q", s)
 }
 
 func statusToast(s storage.AlertStatus) string {
