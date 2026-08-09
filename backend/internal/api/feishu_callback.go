@@ -102,19 +102,55 @@ func handleFeishuCallback(c *gin.Context, d *Deps) {
 	})
 }
 
+// feishuCardEvent 飞书卡片点击回调事件。
+//
+// 飞书 2.0 schema（card.action.trigger）把 action/operator 包在 event 字段下：
+//
+//	{"schema":"2.0","header":{...},"event":{"operator":{...},"action":{"value":{...},"tag":"button"}}}
+//
+// 旧版 schema 则把 action/operator 放在顶层。下面用内嵌结构同时绑定两层：
+// ShouldBindJSON 后 ev.Action/ev.Operator 优先取自 event，为空时回落顶层。
 type feishuCardEvent struct {
-	Action struct {
-		Value  map[string]string `json:"value"`
-		OpenID string            `json:"open_id"`
-	} `json:"action"`
-	Operator struct {
-		OpenID string `json:"open_id"`
-	} `json:"operator"`
+	Event struct {
+		Action   feishuAction `json:"action"`
+		Operator feishuOperator `json:"operator"`
+	} `json:"event"`
+	// 旧版 schema 顶层字段（2.0 下为空）。
+	Action   feishuAction   `json:"action"`
+	Operator feishuOperator `json:"operator"`
+}
+
+type feishuAction struct {
+	Value  map[string]string `json:"value"`
+	OpenID string             `json:"open_id"`
+	Tag    string             `json:"tag"`
+}
+
+type feishuOperator struct {
+	OpenID  string `json:"open_id"`
+	UnionID string `json:"union_id"`
+}
+
+// action 返回事件携带的按钮动作（优先 event 层，回落顶层）。
+func (ev *feishuCardEvent) action() feishuAction {
+	if ev.Event.Action.Value != nil || ev.Event.Action.Tag != "" {
+		return ev.Event.Action
+	}
+	return ev.Action
+}
+
+// operator 返回操作人（优先 event 层，回落顶层）。
+func (ev *feishuCardEvent) operator() feishuOperator {
+	if ev.Event.Operator.OpenID != "" {
+		return ev.Event.Operator
+	}
+	return ev.Operator
 }
 
 // processFeishuCardAction 处理一次按钮点击，返回飞书 toast 文案。
 func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) string {
-	v := ev.Action.Value
+	a := ev.action()
+	v := a.Value
 	alertID := v["alert_id"]
 	action := v["action"]
 	channelID, _ := strconv.ParseUint(v["channel_id"], 10, 64)
@@ -141,10 +177,7 @@ func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) strin
 	if action == "ignored" {
 		status = storage.AlertStatusIgnored
 	}
-	openID := ev.Action.OpenID
-	if openID == "" {
-		openID = ev.Operator.OpenID
-	}
+	openID := ev.operator().OpenID
 	updated, err := d.AlertStates.UpdateStatus(alertID, status, openID)
 	if err != nil {
 		if d.Log != nil {

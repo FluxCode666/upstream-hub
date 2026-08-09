@@ -172,6 +172,49 @@ func TestHandleFeishuCallback_PlainNoSig(t *testing.T) {
 	}
 }
 
+// TestFeishuCardEvent_Schema2Parse 飞书 2.0 schema 把 action/operator 包在 event 字段下，
+// 必须能正确解析出 action.value 里的 alert_id 等。用线上抓到的真实结构。
+func TestFeishuCardEvent_Schema2Parse(t *testing.T) {
+	raw := `{"schema":"2.0","header":{"event_id":"x","event_type":"card.action.trigger"},"event":{"operator":{"open_id":"ou_op1","union_id":"on_u1"},"action":{"value":{"action":"handled","alert_id":"ba0fa24b","channel_id":"7","event":"balance_low"},"tag":"button"}}}`
+	var ev feishuCardEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	a := ev.action()
+	if a.Value["alert_id"] != "ba0fa24b" {
+		t.Fatalf("alert_id = %q, want ba0fa24b (value=%v)", a.Value["alert_id"], a.Value)
+	}
+	if a.Value["action"] != "handled" {
+		t.Fatalf("action = %q, want handled", a.Value["action"])
+	}
+	if a.Value["channel_id"] != "7" {
+		t.Fatalf("channel_id = %q, want 7", a.Value["channel_id"])
+	}
+	if ev.operator().OpenID != "ou_op1" {
+		t.Fatalf("operator open_id = %q, want ou_op1", ev.operator().OpenID)
+	}
+	// 顶层 Action/Operator 应为空（2.0 下不该误取到）。
+	if ev.Action.Value != nil {
+		t.Fatalf("top-level action should be nil in 2.0 schema, got %v", ev.Action.Value)
+	}
+}
+
+// TestFeishuCardEvent_LegacyTopLevelParse 旧版 schema（action/operator 在顶层）也要能解析。
+func TestFeishuCardEvent_LegacyTopLevelParse(t *testing.T) {
+	raw := `{"action":{"value":{"alert_id":"a1","action":"ignored"},"open_id":"ou_top"},"operator":{"open_id":"ou_op2"}}`
+	var ev feishuCardEvent
+	if err := json.Unmarshal([]byte(raw), &ev); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	a := ev.action()
+	if a.Value["alert_id"] != "a1" {
+		t.Fatalf("alert_id = %q, want a1", a.Value["alert_id"])
+	}
+	if ev.operator().OpenID != "ou_op2" {
+		t.Fatalf("operator open_id = %q, want ou_op2", ev.operator().OpenID)
+	}
+}
+
 func signatureHex(ts int64, nonce, key, body string) string {
 	h := sha256.New()
 	h.Write([]byte(strconv.FormatInt(ts, 10) + nonce + key + body))
