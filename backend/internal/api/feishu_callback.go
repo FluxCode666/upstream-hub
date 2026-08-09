@@ -306,7 +306,16 @@ func statusLabel(s storage.AlertStatus) string {
 }
 
 // buildFeishuResolvedCard 构造点击后的终态卡片（无按钮），供回调响应的 card 字段就地替换。
-// 与 notify.buildFeishuCard 同结构（config/header/elements），便于飞书客户端就地替换渲染。
+//
+// 飞书 2.0 card.action.trigger 回调响应的 card 字段不是裸卡片 JSON，而是带类型包装：
+//
+//	{"card": {"type": "raw", "data": {卡片 JSON}}}
+//
+// type=raw 表示用 data 里的卡片 JSON 直接渲染（另一选项 type=template 用卡片模板）。
+// 早期实现直接把 {"config","header","elements"} 放进 card 字段，缺少 type/data 包装层，
+// 飞书报 200672「错误的响应体格式」。详见
+// open.feishu.cn/document/.../feishu-cards/handle-card-callbacks 方式一。
+//
 // AlertState 不存原始 subject/body，这里用 event 标识告警 + 终态文案组成卡片内容。
 func buildFeishuResolvedCard(event string, status storage.AlertStatus) map[string]any {
 	label := statusLabel(status)
@@ -319,14 +328,17 @@ func buildFeishuResolvedCard(event string, status storage.AlertStatus) map[strin
 		content += "（" + event + "）"
 	}
 	return map[string]any{
-		"config": map[string]any{"wide_screen_mode": true},
-		"header": map[string]any{
-			"title": map[string]string{"tag": "plain_text", "content": "告警已处理"},
-		},
-		"elements": []any{
-			map[string]any{
-				"tag":  "div",
-				"text": map[string]string{"tag": "lark_md", "content": content},
+		"type": "raw",
+		"data": map[string]any{
+			"config": map[string]any{"wide_screen_mode": true},
+			"header": map[string]any{
+				"title": map[string]string{"tag": "plain_text", "content": "告警已处理"},
+			},
+			"elements": []any{
+				map[string]any{
+					"tag":  "div",
+					"text": map[string]string{"tag": "lark_md", "content": content},
+				},
 			},
 		},
 	}

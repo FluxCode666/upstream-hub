@@ -216,8 +216,9 @@ func TestFeishuCardEvent_LegacyTopLevelParse(t *testing.T) {
 	}
 }
 
-// TestBuildFeishuResolvedCard 终态卡片结构与发送卡片一致（config/header/elements），
-// 不含按钮 action，elements 含终态文案。供回调响应 card 字段就地替换。
+// TestBuildFeishuResolvedCard 终态卡片需符合飞书 2.0 card.action.trigger 回调响应
+// 的 card 字段格式：外层 {"type":"raw","data":{卡片JSON}}，data 下才是 config/header/elements。
+// 不含按钮 action，elements 含终态文案。早期缺 type/data 包装层飞书报 200672。
 func TestBuildFeishuResolvedCard(t *testing.T) {
 	cases := []struct {
 		status storage.AlertStatus
@@ -229,13 +230,20 @@ func TestBuildFeishuResolvedCard(t *testing.T) {
 	}
 	for _, tc := range cases {
 		card := buildFeishuResolvedCard(tc.event, tc.status)
-		// 结构关键字段
-		if card["config"] == nil || card["header"] == nil || card["elements"] == nil {
-			t.Fatalf("card missing config/header/elements: %v", card)
+		// 外层必须是 type=raw 包装，卡片 JSON 在 data 下。
+		if card["type"] != "raw" {
+			t.Fatalf("card.type = %v, want raw (missing raw wrapper → feishu 200672)", card["type"])
 		}
-		elems, ok := card["elements"].([]any)
+		data, ok := card["data"].(map[string]any)
+		if !ok {
+			t.Fatalf("card.data not map: %T", card["data"])
+		}
+		if data["config"] == nil || data["header"] == nil || data["elements"] == nil {
+			t.Fatalf("card.data missing config/header/elements: %v", data)
+		}
+		elems, ok := data["elements"].([]any)
 		if !ok || len(elems) == 0 {
-			t.Fatalf("elements not non-empty slice: %T", card["elements"])
+			t.Fatalf("elements not non-empty slice: %T", data["elements"])
 		}
 		// 第一个 element 应为 div + 含 badge 文案
 		div, ok := elems[0].(map[string]any)
