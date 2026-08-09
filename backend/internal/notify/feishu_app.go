@@ -96,7 +96,8 @@ func (f *feishuApp) tenantToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if r.IsError() || resp.Code != 0 {
-		return "", fmt.Errorf("feishu tenant_token: code=%d msg=%s", resp.Code, resp.Msg)
+		return "", fmt.Errorf("feishu tenant_token: http=%d code=%d msg=%s body=%s",
+			r.StatusCode(), resp.Code, resp.Msg, r.String())
 	}
 	f.token.value = resp.TenantAccessToken
 	f.token.expiresAt = time.Now().Add(time.Duration(resp.Expire) * time.Second)
@@ -135,8 +136,12 @@ func (f *feishuApp) Send(ctx context.Context, msg Message) error {
 	if err != nil {
 		return err
 	}
+	// 飞书成功响应：HTTP 200 + body {"code":0,"msg":"success","data":{"message_id":...}}
+	// code 非 0 或 HTTP 非 2xx 都算失败。把状态码 + 原始 body 一起带进错误信息，
+	// 便于定位（比如 chat_id 不是 oc_ 开头、机器人未入群、权限缺失等飞书侧原因）。
 	if r.IsError() || resp.Code != 0 {
-		return fmt.Errorf("feishu send message: code=%d msg=%s", resp.Code, resp.Msg)
+		return fmt.Errorf("feishu send message: http=%d code=%d msg=%s body=%s",
+			r.StatusCode(), resp.Code, resp.Msg, r.String())
 	}
 	if msg.Extra != nil && resp.Data.MessageID != "" {
 		msg.Extra[feishuExtraKeyMessageID] = resp.Data.MessageID
@@ -244,7 +249,8 @@ func (f *feishuApp) UpdateCard(ctx context.Context, messageID, statusText string
 		return err
 	}
 	if r.IsError() || resp.Code != 0 {
-		return fmt.Errorf("feishu update card: code=%d msg=%s", resp.Code, resp.Msg)
+		return fmt.Errorf("feishu update card: http=%d code=%d msg=%s body=%s",
+			r.StatusCode(), resp.Code, resp.Msg, r.String())
 	}
 	return nil
 }
