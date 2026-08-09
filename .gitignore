@@ -50,6 +50,9 @@ postgres-data/
 .claude/
 CLAUDE.md
 
+# Reasonix
+.reasonix/
+
 # Demo overlay —— 本地演示沙箱，永远不进 git
 Dockerfile.demo
 docker-compose.demo.yml
