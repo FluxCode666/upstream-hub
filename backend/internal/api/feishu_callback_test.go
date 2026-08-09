@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/worryzyy/upstream-hub/internal/storage"
 )
 
 // feishuEncrypt 是飞书加密方向的逆运算，用于在测试里造加密 body。
@@ -212,6 +213,42 @@ func TestFeishuCardEvent_LegacyTopLevelParse(t *testing.T) {
 	}
 	if ev.operator().OpenID != "ou_op2" {
 		t.Fatalf("operator open_id = %q, want ou_op2", ev.operator().OpenID)
+	}
+}
+
+// TestBuildFeishuResolvedCard 终态卡片结构与发送卡片一致（config/header/elements），
+// 不含按钮 action，elements 含终态文案。供回调响应 card 字段就地替换。
+func TestBuildFeishuResolvedCard(t *testing.T) {
+	cases := []struct {
+		status storage.AlertStatus
+		event  string
+		wantBadge string
+	}{
+		{storage.AlertStatusHandled, "balance_low", "✅"},
+		{storage.AlertStatusIgnored, "rate_limit", "🚫"},
+	}
+	for _, tc := range cases {
+		card := buildFeishuResolvedCard(tc.event, tc.status)
+		// 结构关键字段
+		if card["config"] == nil || card["header"] == nil || card["elements"] == nil {
+			t.Fatalf("card missing config/header/elements: %v", card)
+		}
+		elems, ok := card["elements"].([]any)
+		if !ok || len(elems) == 0 {
+			t.Fatalf("elements not non-empty slice: %T", card["elements"])
+		}
+		// 第一个 element 应为 div + 含 badge 文案
+		div, ok := elems[0].(map[string]any)
+		if !ok || div["tag"] != "div" {
+			t.Fatalf("first element not div: %v", elems[0])
+		}
+		text, _ := div["text"].(map[string]string)
+		if !strings.Contains(text["content"], tc.wantBadge) {
+			t.Fatalf("card content %q missing badge %q", text["content"], tc.wantBadge)
+		}
+		if !strings.Contains(text["content"], tc.event) {
+			t.Fatalf("card content %q missing event %q", text["content"], tc.event)
+		}
 	}
 }
 

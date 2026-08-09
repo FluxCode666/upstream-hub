@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/worryzyy/upstream-hub/internal/notify"
 	"github.com/worryzyy/upstream-hub/internal/storage"
 )
 
@@ -96,10 +95,12 @@ func handleFeishuCallback(c *gin.Context, d *Deps) {
 		c.JSON(http.StatusOK, gin.H{"code": 0})
 		return
 	}
-	toast := processFeishuCardAction(c, &ev, d)
-	c.JSON(http.StatusOK, gin.H{
-		"toast": gin.H{"type": "success", "content": toast},
-	})
+	toast, card := processFeishuCardAction(&ev, d)
+	resp := gin.H{"toast": gin.H{"type": "success", "content": toast}}
+	if card != nil {
+		resp["card"] = card
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // feishuCardEvent 飞书卡片点击回调事件。
@@ -147,8 +148,10 @@ func (ev *feishuCardEvent) operator() feishuOperator {
 	return ev.Operator
 }
 
-// processFeishuCardAction 处理一次按钮点击，返回飞书 toast 文案。
-func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) string {
+// processFeishuCardAction 处理一次按钮点击，返回飞书 toast 文案与就地替换的新卡片。
+// 新卡片通过回调响应的 card 字段返回，飞书客户端即时替换当前卡片（不走 PATCH，
+// 飞书对 interactive 消息的 PATCH 不重渲染）。card 为 nil 时响应不带 card。
+func processFeishuCardAction(ev *feishuCardEvent, d *Deps) (string, map[string]any) {
 	a := ev.action()
 	v := a.Value
 	alertID := v["alert_id"]
@@ -157,7 +160,7 @@ func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) strin
 	event := storage.NotificationEvent(v["event"])
 
 	if alertID == "" {
-		return "无效的告警"
+		return "无效的告警", nil
 	}
 
 	st, err := d.AlertStates.FindByAlertID(alertID)
@@ -165,12 +168,12 @@ func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) strin
 		if d.Log != nil {
 			d.Log.Warn("feishu alert not found", "alert_id", alertID, "err", err)
 		}
-		return "告警记录不存在"
+		return "告警记录不存在", nil
 	}
 
-	// 已终态：幂等返回当前状态，不重复处理 / 更新卡片。
+	// 已终态：幂等返回当前状态，不重复处理 / 不更新卡片。
 	if st.Status == storage.AlertStatusHandled || st.Status == storage.AlertStatusIgnored {
-		return statusToast(st.Status)
+		return statusToast(st.Status), nil
 	}
 
 	status := storage.AlertStatusHandled
@@ -183,7 +186,7 @@ func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) strin
 		if d.Log != nil {
 			d.Log.Warn("feishu update status", "alert_id", alertID, "err", err)
 		}
-		return "处理失败"
+		return "处理失败", nil
 	}
 
 	// 已处理 → 清除该上游该事件冷却，让下次扫描能重新评估（静默窗由 dispatcher.suppressByAlertState 兜底）。
@@ -193,73 +196,12 @@ func processFeishuCardAction(c *gin.Context, ev *feishuCardEvent, d *Deps) strin
 		}
 	}
 
-	// 就地更新卡片（best-effort，失败不影响状态已落库）。
-	if updated.FeishuMessageID != "" {
-		if d.Log != nil {
-			d.Log.Info("feishu try update card", "alert_id", alertID,
-				"message_id", updated.FeishuMessageID, "status", status)
-		}
-		updateFeishuCardAsync(c, d, updated)
-	} else if d.Log != nil {
-		d.Log.Info("feishu skip update card (no message_id)", "alert_id", alertID)
+	// 通过回调响应返回终态卡片就地替换，不走 PATCH（飞书 interactive PATCH 不重渲染）。
+	if d.Log != nil {
+		d.Log.Info("feishu respond resolved card", "alert_id", alertID,
+			"message_id", updated.FeishuMessageID, "status", status)
 	}
-	return statusToast(status)
-}
-
-// updateFeishuCardAsync 用通知渠道配置构造飞书 app client 更新卡片。
-// here 用同步：回调响应里返回新卡片内容也可，但 PATCH 更新整张卡片更直观。
-// 各分支均记日志，便于线上定位"卡片不更新"卡在哪一步。
-func updateFeishuCardAsync(c *gin.Context, d *Deps, st *storage.AlertState) {
-	ch, err := d.Notifies.FindChannel(st.NotifyChannelID)
-	if err != nil || ch == nil {
-		// NotifyChannelID 未落库时（旧路径）兜底：尝试所有已启用飞书渠道
-		if d.Log != nil {
-			d.Log.Info("feishu update card: channel not found, fallback",
-				"notify_channel_id", st.NotifyChannelID, "err", err)
-		}
-		ch = findFeishuAppChannel(d)
-		if ch == nil {
-			if d.Log != nil {
-				d.Log.Warn("feishu update card: no enabled feishu channel")
-			}
-			return
-		}
-	}
-	cfgJSON, err := d.Cipher.Decrypt(ch.ConfigCipher)
-	if err != nil {
-		if d.Log != nil {
-			d.Log.Warn("feishu update card: decrypt config", "channel", ch.ID, "err", err)
-		}
-		return
-	}
-	app, err := notify.NewFeishuAppFromConfig(cfgJSON)
-	if err != nil {
-		if d.Log != nil {
-			d.Log.Warn("feishu update card: new app", "channel", ch.ID, "err", err)
-		}
-		return
-	}
-	statusText := "✅ 已由 " + st.HandledBy + " 标记为" + statusLabel(st.Status)
-	if err := app.UpdateCard(c.Request.Context(), st.FeishuMessageID, statusText); err != nil {
-		if d.Log != nil {
-			d.Log.Warn("feishu update card", "message_id", st.FeishuMessageID, "err", err)
-		}
-	} else if d.Log != nil {
-		d.Log.Info("feishu update card ok", "message_id", st.FeishuMessageID, "channel", ch.ID)
-	}
-}
-
-func findFeishuAppChannel(d *Deps) *storage.NotificationChannel {
-	list, err := d.Notifies.ListEnabledChannels()
-	if err != nil {
-		return nil
-	}
-	for i := range list {
-		if list[i].Type == storage.NotifyFeishu {
-			return &list[i]
-		}
-	}
-	return nil
+	return statusToast(status), buildFeishuResolvedCard(string(event), status)
 }
 
 // feishuDecrypt 解密飞书加密模式的请求体。
@@ -360,5 +302,32 @@ func statusLabel(s storage.AlertStatus) string {
 		return "不处理"
 	default:
 		return string(s)
+	}
+}
+
+// buildFeishuResolvedCard 构造点击后的终态卡片（无按钮），供回调响应的 card 字段就地替换。
+// 与 notify.buildFeishuCard 同结构（config/header/elements），便于飞书客户端就地替换渲染。
+// AlertState 不存原始 subject/body，这里用 event 标识告警 + 终态文案组成卡片内容。
+func buildFeishuResolvedCard(event string, status storage.AlertStatus) map[string]any {
+	label := statusLabel(status)
+	badge := "✅"
+	if status == storage.AlertStatusIgnored {
+		badge = "🚫"
+	}
+	content := badge + " " + label
+	if event != "" {
+		content += "（" + event + "）"
+	}
+	return map[string]any{
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": map[string]any{
+			"title": map[string]string{"tag": "plain_text", "content": "告警已处理"},
+		},
+		"elements": []any{
+			map[string]any{
+				"tag":  "div",
+				"text": map[string]string{"tag": "lark_md", "content": content},
+			},
+		},
 	}
 }
