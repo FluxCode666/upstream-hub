@@ -110,21 +110,19 @@ func TestFeishuAppSendsCardWithButtonValues(t *testing.T) {
 		actions, _ := m["actions"].([]any)
 		for _, a := range actions {
 			btn, _ := a.(map[string]any)
-			val, _ := btn["value"].(map[string]any)
-			action, _ := val["action"].(string)
-			if action == "handled" {
-				foundHandled = true
-				if val["alert_id"] != "aid-xyz" {
-					t.Fatalf("handled alert_id = %v", val["alert_id"])
-				}
-				if val["channel_id"] != "7" {
-					t.Fatalf("handled channel_id = %v", val["channel_id"])
-				}
-				if val["event"] != "balance_low" {
-					t.Fatalf("handled event = %v", val["event"])
-				}
+			if btn["tag"] != "button" {
+				continue
 			}
-			if action == "ignored" {
+			// 按钮仅作视觉占位，不带 value（无回调闭环）。
+			if _, hasValue := btn["value"]; hasValue {
+				t.Fatalf("button should not carry value: %v", btn["value"])
+			}
+			t, _ := btn["text"].(map[string]any)
+			content, _ := t["content"].(string)
+			if content == "✅ 已处理" {
+				foundHandled = true
+			}
+			if content == "🚫 不处理" {
 				foundIgnored = true
 			}
 		}

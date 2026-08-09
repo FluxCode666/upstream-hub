@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -150,13 +149,12 @@ func (f *feishuApp) Send(ctx context.Context, msg Message) error {
 }
 
 // buildFeishuCard 构造告警交互卡片。
-// 按钮的 value 带 alert_id / action / channel_id / event，飞书点按后回调端点据此处理。
+//
+// 按钮仅作视觉占位（“已处理 / 不处理”提示），不带 value，不触发飞书 action trigger
+// 回调。长连接 / 无回调配置下点了无副作用，避免卡片假装存在一个并不存在的交互闭环。
+// 后续若重新启用 HTTP 回调，在此给按钮补回 value（alert_id / channel_id / event / action）即可。
 func buildFeishuCard(msg Message) map[string]any {
-	alertID, _ := msg.Extra["alert_id"].(string)
-	channelID, _ := msg.Extra["channel_id"].(uint)
-	event := string(msg.Event)
-
-	btn := func(text string, action string, btnType string) map[string]any {
+	btn := func(text string, btnType string) map[string]any {
 		return map[string]any{
 			"tag": "button",
 			"text": map[string]string{
@@ -164,12 +162,6 @@ func buildFeishuCard(msg Message) map[string]any {
 				"content": text,
 			},
 			"type": btnType,
-			"value": map[string]string{
-				"action":     action,
-				"alert_id":   alertID,
-				"channel_id": strconv.FormatUint(uint64(channelID), 10),
-				"event":      event,
-			},
 		}
 	}
 	return map[string]any{
@@ -188,8 +180,8 @@ func buildFeishuCard(msg Message) map[string]any {
 			map[string]any{
 				"tag": "action",
 				"actions": []any{
-					btn("✅ 已处理", "handled", "primary"),
-					btn("🚫 不处理", "ignored", "danger"),
+					btn("✅ 已处理", "primary"),
+					btn("🚫 不处理", "danger"),
 				},
 			},
 		},
