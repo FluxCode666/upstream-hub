@@ -2,9 +2,13 @@ package api
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -24,13 +28,17 @@ func registerFeishuCallback(r gin.IRouter, path string, d *Deps) {
 
 // handleFeishuCallback 处理飞书交互卡片回调。
 //
-// 两类请求：
-//  1. URL 验证：飞书配置回调地址时探测，回 challenge。
-//  2. 卡片按钮点击：验签后按 action.value 更新 AlertState 状态、联动冷却、就地更新卡片。
+// 飞书后台「事件与回调」开启加密策略后，请求体被 AES 加密成
+// {"encrypt":"<base64>"}，且不带签名头；关闭加密策略时是明文 JSON + 签名头。
+// 本端点两种都兼容：
 //
-// 验签：sha256(timestamp + nonce + encryptKey + body) 对比 X-Lark-Signature。
-// 全程错误对外返回 200（避免飞书疯狂重试），错误细节记日志。
-// 详见计划 2.4。
+//  1. 解密：body 若含 encrypt 字段，用 Encrypt Key 按 AES-256-CBC 解密（与飞书
+//     官方 SDK event.EventDecrypt 算法一致）得到明文，解密本身即鉴权。
+//  2. 验签：非加密请求必须靠 X-Lark-Signature 验签；加密请求跳过（飞书加密模式不带签名头）。
+//  3. URL 验证：探测请求回 challenge。
+//  4. 卡片点击：按 action.value 更新 AlertState 状态、联动冷却、就地更新卡片。
+//
+// 全程错误对外返回 200（避免飞书疯狂重试），错误细节记日志。详见计划 2.4。
 func handleFeishuCallback(c *gin.Context, d *Deps) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -39,7 +47,29 @@ func handleFeishuCallback(c *gin.Context, d *Deps) {
 	// 复原 body 供后续 c.ShouldBindJSON 失败时的兜底使用
 	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-	if !verifyFeishuSignature(c, body, d.FeishuEncryptKey) {
+	// (1) 加密模式：body 形如 {"encrypt":"..."} → 解密成明文后续统一处理。
+	// 加密模式飞书不带签名头（X-Lark-Signature），解密本身即鉴权；
+	// 非加密模式是明文 body，必须靠签名头验签。
+	encrypted := false
+	var enc struct {
+		Encrypt string `json:"encrypt"`
+	}
+	if json.Unmarshal(body, &enc) == nil && enc.Encrypt != "" {
+		plain, derr := feishuDecrypt(enc.Encrypt, d.FeishuEncryptKey)
+		if derr != nil {
+			if d.Log != nil {
+				d.Log.Warn("feishu callback decrypt", "err", derr)
+			}
+			c.JSON(http.StatusOK, gin.H{"code": 1, "msg": "decrypt fail"})
+			return
+		}
+		body = plain
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		encrypted = true
+	}
+
+	// (2) 验签：非加密请求必须通过签名校验；加密请求解密本身即鉴权，跳过。
+	if !encrypted && !verifyFeishuSignature(c, body, d.FeishuEncryptKey) {
 		if d.Log != nil {
 			d.Log.Warn("feishu callback signature mismatch")
 		}
@@ -47,7 +77,7 @@ func handleFeishuCallback(c *gin.Context, d *Deps) {
 		return
 	}
 
-	// URL 验证探测。
+	// (3) URL 验证探测（解密后或明文都走这里）。
 	var probe struct {
 		Type      string `json:"type"`
 		Challenge string `json:"challenge"`
@@ -57,7 +87,7 @@ func handleFeishuCallback(c *gin.Context, d *Deps) {
 		return
 	}
 
-	// 卡片点击。
+	// (4) 卡片点击。
 	var ev feishuCardEvent
 	if err := c.ShouldBindJSON(&ev); err != nil {
 		if d.Log != nil {
@@ -173,6 +203,54 @@ func findFeishuAppChannel(d *Deps) *storage.NotificationChannel {
 		}
 	}
 	return nil
+}
+
+// feishuDecrypt 解密飞书加密模式的请求体。
+//
+// 算法与飞书官方 SDK（github.com/larksuite/oapi-sdk-go v3 event.EventDecrypt）
+// 完全一致：
+//  1. base64 解码 encrypt 字段。
+//  2. 前 aes.BlockSize(16) 字节作为 IV，其余为密文。
+//  3. sha256(encryptKey) 派生 32 字节 AES-256 密钥。
+//  4. AES-CBC 解密，截取首个 '{' 到末个 '}' 之间的明文 JSON。
+func feishuDecrypt(encryptB64, key string) ([]byte, error) {
+	buf, err := base64.StdEncoding.DecodeString(encryptB64)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode: %w", err)
+	}
+	if len(buf) < aes.BlockSize {
+		return nil, fmt.Errorf("cipher too short: %d", len(buf))
+	}
+	sum := sha256.Sum256([]byte(key))
+	block, err := aes.NewCipher(sum[:sha256.Size])
+	if err != nil {
+		return nil, fmt.Errorf("aes new cipher: %w", err)
+	}
+	iv := buf[:aes.BlockSize]
+	ct := buf[aes.BlockSize:]
+	if len(ct)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext not block-aligned: %d", len(ct))
+	}
+	mode := cipher.NewCBCDecrypter(block, iv)
+	plain := make([]byte, len(ct))
+	mode.CryptBlocks(plain, ct)
+	// 飞书密文含随机 IV 前缀 + PKCS7 填充，明文 JSON 夹在中间，按 SDK 做法
+	// 截取首个 '{' 到末个 '}'。
+	n := strings.Index(string(plain), "{")
+	if n == -1 {
+		n = 0
+	}
+	m := strings.LastIndex(string(plain), "}")
+	if m == -1 {
+		m = len(plain) - 1
+	}
+	return plain[n : m+1], nil
+}
+
+// hasSignatureHeader 判断请求是否携带飞书签名头（加密模式不带，非加密模式带）。
+// 保留供调试/未来按需校验，当前验签由 encrypted 标记决定。
+func hasSignatureHeader(c *gin.Context) bool {
+	return c.GetHeader("X-Lark-Signature") != ""
 }
 
 func verifyFeishuSignature(c *gin.Context, body []byte, key string) bool {
