@@ -137,3 +137,58 @@ func TestFeishuAppSendsCardWithButtonValues(t *testing.T) {
 		t.Fatalf("message_id not written back: %v", msg.Extra["feishu_message_id"])
 	}
 }
+
+// TestBuildFeishuCardActionsOnlyForBalanceLow 验证只有余额告警卡片带「已处理 / 不处理」
+// 操作按钮，其余事件卡片只展示正文、没有按钮区。
+//
+// 背景：rate_changed 不走 dispatchAlert，Extra 里没有 alert_id；如果给它挂按钮，
+// 回调端点拿到空 alert_id 会直接返回「无效的告警」，按钮形同虚设。因此按事件类型
+// 收敛按钮范围：仅 balance_low 有 action。
+func TestBuildFeishuCardActionsOnlyForBalanceLow(t *testing.T) {
+	cases := []struct {
+		name     string
+		event    storage.NotificationEvent
+		wantBtns bool
+	}{
+		{"balance_low 带按钮", storage.EventBalanceLow, true},
+		{"rate_changed 无按钮", storage.EventRateChanged, false},
+		{"login_failed 无按钮", storage.EventLoginFailed, false},
+		{"captcha_failed 无按钮", storage.EventCaptchaFailed, false},
+		{"monitor_failed 无按钮", storage.EventMonitorFailed, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := Message{
+				Event:     tc.event,
+				ChannelID: 7,
+				Subject:   "告警",
+				Body:      "正文",
+				Extra: map[string]any{
+					"alert_id":   "aid-xyz",
+					"channel_id": uint(7),
+				},
+			}
+			card := buildFeishuCard(msg)
+			elements, _ := card["elements"].([]any)
+			hasAction := false
+			for _, el := range elements {
+				m, _ := el.(map[string]any)
+				if m["tag"] == "action" {
+					hasAction = true
+					break
+				}
+			}
+			if hasAction != tc.wantBtns {
+				t.Fatalf("event=%s action=%v want=%v", tc.event, hasAction, tc.wantBtns)
+			}
+			// 正文 div 对所有事件都应存在。
+			if len(elements) == 0 {
+				t.Fatalf("event=%s card has no elements", tc.event)
+			}
+			first, _ := elements[0].(map[string]any)
+			if first["tag"] != "div" {
+				t.Fatalf("event=%s first element tag=%v want=div", tc.event, first["tag"])
+			}
+		})
+	}
+}

@@ -150,27 +150,48 @@ func (f *feishuApp) Send(ctx context.Context, msg Message) error {
 }
 
 // buildFeishuCard 构造告警交互卡片。
-// 按钮的 value 带 alert_id / action / channel_id / event，飞书点按后回调端点据此处理。
+//
+// 仅余额告警（balance_low）附带「已处理 / 不处理」操作按钮：按钮 value 带
+// alert_id / action / channel_id / event，飞书点按后回调端点据此更新 AlertState
+// 并就地替换为终态卡片。其余事件（倍率变化、登录失败、验证码失败、监控异常等）
+// 只展示正文，不带按钮——这些事件要么没有 alert_id（rate_changed 不走
+// dispatchAlert，按钮 value 为空、回调端点会判「无效的告警」），要么不需要
+// 「处理后静默」的交互语义，挂按钮反而让卡片多出无效操作。
 func buildFeishuCard(msg Message) map[string]any {
-	alertID, _ := msg.Extra["alert_id"].(string)
-	channelID, _ := msg.Extra["channel_id"].(uint)
-	event := string(msg.Event)
+	elements := []any{
+		map[string]any{
+			"tag":  "div",
+			"text": map[string]string{"tag": "lark_md", "content": EscapeFeishuMd(msg.Body)},
+		},
+	}
+	if msg.Event == storage.EventBalanceLow {
+		alertID, _ := msg.Extra["alert_id"].(string)
+		channelID, _ := msg.Extra["channel_id"].(uint)
+		event := string(msg.Event)
 
-	btn := func(text string, action string, btnType string) map[string]any {
-		return map[string]any{
-			"tag": "button",
-			"text": map[string]string{
-				"tag":     "plain_text",
-				"content": text,
-			},
-			"type": btnType,
-			"value": map[string]string{
-				"action":     action,
-				"alert_id":   alertID,
-				"channel_id": strconv.FormatUint(uint64(channelID), 10),
-				"event":      event,
-			},
+		btn := func(text string, action string, btnType string) map[string]any {
+			return map[string]any{
+				"tag": "button",
+				"text": map[string]string{
+					"tag":     "plain_text",
+					"content": text,
+				},
+				"type": btnType,
+				"value": map[string]string{
+					"action":     action,
+					"alert_id":   alertID,
+					"channel_id": strconv.FormatUint(uint64(channelID), 10),
+					"event":      event,
+				},
+			}
 		}
+		elements = append(elements, map[string]any{
+			"tag": "action",
+			"actions": []any{
+				btn("✅ 已处理", "handled", "primary"),
+				btn("🚫 不处理", "ignored", "danger"),
+			},
+		})
 	}
 	return map[string]any{
 		"config": map[string]any{"wide_screen_mode": true},
@@ -180,19 +201,7 @@ func buildFeishuCard(msg Message) map[string]any {
 				"content": msg.Subject,
 			},
 		},
-		"elements": []any{
-			map[string]any{
-				"tag":  "div",
-				"text": map[string]string{"tag": "lark_md", "content": EscapeFeishuMd(msg.Body)},
-			},
-			map[string]any{
-				"tag": "action",
-				"actions": []any{
-					btn("✅ 已处理", "handled", "primary"),
-					btn("🚫 不处理", "ignored", "danger"),
-				},
-			},
-		},
+		"elements": elements,
 	}
 }
 
