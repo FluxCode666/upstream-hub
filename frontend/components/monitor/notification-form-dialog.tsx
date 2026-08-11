@@ -79,6 +79,10 @@ interface FormState {
   subs: SubRow[]
 }
 
+// REDACTED 与后端 notify.RedactedSentinel 保持一致：配置预览里密钥字段的占位值。
+// 编辑表单原样回填到密钥输入框；保存时原样回传，后端 MergeConfig 见到该值就保留原密钥。
+const REDACTED = "__REDACTED__"
+
 function emptyConfig(): ConfigState {
   return {
     bot_token: "",
@@ -119,9 +123,78 @@ function initialState(c?: NotificationChannel | null): FormState {
     name: c?.name ?? "",
     type: c?.type ?? "telegram",
     enabled: c?.enabled ?? true,
-    cfg: emptyConfig(),
+    cfg: configFromPreview(c?.type ?? "telegram", c?.config_preview),
     subs,
   }
+}
+
+// configFromPreview 用后端回显的脱敏配置预览填充编辑表单。
+//   - 密钥字段（bot_token / password / app_secret / 各 secret）回填 REDACTED 哨兵，
+//     密码输入框显示为圆点；保存时原样回传，后端保留原值。
+//   - 非敏感字段（mode / url / id / host / port …）按真实值回显。
+//   - preview 缺失或字段不存在时留空，走“留空保留原值”兜底。
+function configFromPreview(
+  type: NotificationChannelType,
+  preview?: Record<string, unknown>,
+): ConfigState {
+  const cfg = emptyConfig()
+  if (!preview) return cfg
+  const str = (k: string): string => {
+    const v = preview[k]
+    return typeof v === "string" ? v : ""
+  }
+  const num = (k: string): string => {
+    const v = preview[k]
+    return typeof v === "number" ? String(v) : ""
+  }
+  const arr = (k: string): string => {
+    const v = preview[k]
+    return Array.isArray(v) ? v.join(",") : ""
+  }
+  switch (type) {
+    case "telegram":
+      cfg.bot_token = str("bot_token")
+      cfg.chat_id = str("chat_id")
+      break
+    case "webhook":
+      cfg.url = str("url")
+      cfg.method = str("method") || "POST"
+      // headers 是对象，回显成 JSON 字符串（哨兵字符串也原样回填）
+      cfg.headers =
+        typeof preview.headers === "object" && preview.headers !== null
+          ? JSON.stringify(preview.headers)
+          : str("headers")
+      break
+    case "email":
+      cfg.host = str("host")
+      cfg.port = num("port")
+      cfg.username = str("username")
+      cfg.password = str("password")
+      cfg.from = str("from")
+      cfg.to = arr("to")
+      cfg.use_tls = !!preview.use_tls
+      break
+    case "bark":
+      cfg.url = str("url")
+      break
+    case "wecom":
+      cfg.webhook_url = str("webhook_url")
+      break
+    case "dingtalk":
+      cfg.webhook_url = str("webhook_url")
+      cfg.secret = str("secret")
+      break
+    case "feishu":
+      // mode 决定单选菜单回显“群机器人”还是“自建应用”
+      cfg.feishu_mode = str("mode") === "app" ? "app" : "webhook"
+      cfg.app_id = str("app_id")
+      cfg.app_secret = str("app_secret")
+      cfg.chat_id = str("chat_id")
+      cfg.webhook_url = str("webhook_url")
+      cfg.secret = str("secret")
+      break
+  }
+  return cfg
 }
 
 // buildConfigByType 把 cfg state 序列化成各 notifier 期望的 JSON。

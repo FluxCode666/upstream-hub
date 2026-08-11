@@ -19,7 +19,7 @@ func registerNotifications(g *gin.RouterGroup, d *Deps) {
 			fail(c, http.StatusInternalServerError, err)
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"data": list})
+		c.JSON(http.StatusOK, gin.H{"data": notifyChannelResponses(d, list)})
 	})
 	gpc.POST("", func(c *gin.Context) { createNotifyChannel(c, d) })
 	gpc.PUT("/:id", func(c *gin.Context) { updateNotifyChannel(c, d) })
@@ -104,7 +104,7 @@ func createNotifyChannel(c *gin.Context, d *Deps) {
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": ch})
+	c.JSON(http.StatusOK, gin.H{"data": notifyChannelResponse(d, ch)})
 }
 
 func updateNotifyChannel(c *gin.Context, d *Deps) {
@@ -133,7 +133,15 @@ func updateNotifyChannel(c *gin.Context, d *Deps) {
 	ch.Enabled = in.Enabled
 	ch.Subscriptions = subs
 	if in.Config != "" {
-		cipherCfg, err := d.Cipher.Encrypt(in.Config)
+		// 合并哨兵字段：incoming 里值为 __REDACTED__ 的密钥保留数据库已有真实值，
+		// 避免“只改名 / 只改一个字段”把其它密钥冲空。
+		existingPlain, _ := d.Cipher.Decrypt(ch.ConfigCipher)
+		merged, err := notify.MergeConfig(in.Config, existingPlain)
+		if err != nil {
+			fail(c, http.StatusInternalServerError, err)
+			return
+		}
+		cipherCfg, err := d.Cipher.Encrypt(merged)
 		if err != nil {
 			fail(c, http.StatusInternalServerError, err)
 			return
@@ -144,7 +152,7 @@ func updateNotifyChannel(c *gin.Context, d *Deps) {
 		fail(c, http.StatusInternalServerError, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": ch})
+	c.JSON(http.StatusOK, gin.H{"data": notifyChannelResponse(d, ch)})
 }
 
 func testNotify(c *gin.Context, d *Deps) {
@@ -167,4 +175,32 @@ func testNotify(c *gin.Context, d *Deps) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// notifyChannelResponse 是通知渠道的 API 响应 DTO：在 GORM 模型字段之外附带
+// config_preview，供前端编辑表单回显当前配置结构（mode / 非敏感字段）+ 密钥脱敏占位。
+// ConfigCipher 本身是 json:"-"，永远不会外泄。
+type notifyChannelDTO struct {
+	*storage.NotificationChannel
+	ConfigPreview map[string]any `json:"config_preview,omitempty"`
+}
+
+// notifyChannelResponse 把单个渠道解密 + 脱敏后包装成响应 DTO。
+// 解密失败时 ConfigPreview 留空，前端回退到空表单（留空 = 保留原配置）。
+func notifyChannelResponse(d *Deps, ch *storage.NotificationChannel) gin.H {
+	plain, err := d.Cipher.Decrypt(ch.ConfigCipher)
+	preview := notify.RedactConfig(string(ch.Type), plain)
+	if err != nil {
+		preview = nil
+	}
+	return gin.H{"data": notifyChannelDTO{NotificationChannel: ch, ConfigPreview: preview}}
+}
+
+// notifyChannelResponses 批量版，给列表接口用。
+func notifyChannelResponses(d *Deps, list []storage.NotificationChannel) []gin.H {
+	out := make([]gin.H, 0, len(list))
+	for i := range list {
+		out = append(out, notifyChannelResponse(d, &list[i]))
+	}
+	return out
 }

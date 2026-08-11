@@ -102,6 +102,9 @@ export interface NotificationChannel {
   type: NotificationChannelType
   enabled: boolean
   subscriptions?: string
+  // config_preview: 后端回显的脱敏配置（密钥替换成 "__REDACTED__" 哨兵）。
+  // 仅用于编辑表单回显结构 + mode；保存时哨兵原样回传，后端 MergeConfig 保留原值。
+  config_preview?: Record<string, unknown>
   created_at: string
   updated_at: string
 }
