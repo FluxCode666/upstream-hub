@@ -79,10 +79,6 @@ interface FormState {
   subs: SubRow[]
 }
 
-// REDACTED 与后端 notify.RedactedSentinel 保持一致：配置预览里密钥字段的占位值。
-// 编辑表单原样回填到密钥输入框；保存时原样回传，后端 MergeConfig 见到该值就保留原密钥。
-const REDACTED = "__REDACTED__"
-
 function emptyConfig(): ConfigState {
   return {
     bot_token: "",
