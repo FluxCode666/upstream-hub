@@ -177,7 +177,7 @@ func testNotify(c *gin.Context, d *Deps) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// notifyChannelResponse 是通知渠道的 API 响应 DTO：在 GORM 模型字段之外附带
+// notifyChannelDTO 是通知渠道的 API 响应 DTO：在 GORM 模型字段之外附带
 // config_preview，供前端编辑表单回显当前配置结构（mode / 非敏感字段）+ 密钥脱敏占位。
 // ConfigCipher 本身是 json:"-"，永远不会外泄。
 type notifyChannelDTO struct {
@@ -185,22 +185,29 @@ type notifyChannelDTO struct {
 	ConfigPreview map[string]any `json:"config_preview,omitempty"`
 }
 
-// notifyChannelResponse 把单个渠道解密 + 脱敏后包装成响应 DTO。
+// buildNotifyChannelDTO 解密 + 脱敏单个渠道，返回 DTO（不包 data 外壳）。
 // 解密失败时 ConfigPreview 留空，前端回退到空表单（留空 = 保留原配置）。
-func notifyChannelResponse(d *Deps, ch *storage.NotificationChannel) gin.H {
+func buildNotifyChannelDTO(d *Deps, ch *storage.NotificationChannel) notifyChannelDTO {
 	plain, err := d.Cipher.Decrypt(ch.ConfigCipher)
 	preview := notify.RedactConfig(string(ch.Type), plain)
 	if err != nil {
 		preview = nil
 	}
-	return gin.H{"data": notifyChannelDTO{NotificationChannel: ch, ConfigPreview: preview}}
+	return notifyChannelDTO{NotificationChannel: ch, ConfigPreview: preview}
+}
+
+// notifyChannelResponse 单个渠道响应：{"data": dto}。给创建/更新接口用。
+func notifyChannelResponse(d *Deps, ch *storage.NotificationChannel) gin.H {
+	return gin.H{"data": buildNotifyChannelDTO(d, ch)}
 }
 
 // notifyChannelResponses 批量版，给列表接口用。
-func notifyChannelResponses(d *Deps, list []storage.NotificationChannel) []gin.H {
-	out := make([]gin.H, 0, len(list))
+// 注意：列表元素必须是渠道对象本身（含 config_preview），不能再套一层 data 外壳，
+// 否则前端 useApi<NotificationChannel[]> 拿到的每个元素没有 id/name/type。
+func notifyChannelResponses(d *Deps, list []storage.NotificationChannel) []notifyChannelDTO {
+	out := make([]notifyChannelDTO, 0, len(list))
 	for i := range list {
-		out = append(out, notifyChannelResponse(d, &list[i]))
+		out = append(out, buildNotifyChannelDTO(d, &list[i]))
 	}
 	return out
 }
