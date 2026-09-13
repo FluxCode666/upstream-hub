@@ -116,6 +116,16 @@ func openSQLite(cfg DBConfig) (*gorm.DB, error) {
 		Logger: newGormLogger(),
 	})
 	if err != nil {
+		// modernc 驱动把所有打开失败（含权限不足）都报成 "out of memory (14)"，
+		// 极度误导。这里先探一次真实原因，权限问题给出直白的提示。
+		if probe, perr := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644); perr != nil {
+			if os.IsPermission(perr) {
+				return nil, fmt.Errorf("open sqlite: no write permission on %s (running as uid=%d gid=%d): %w", path, os.Getuid(), os.Getgid(), perr)
+			}
+			return nil, fmt.Errorf("open sqlite %s: %w", path, perr)
+		} else {
+			_ = probe.Close()
+		}
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	sqlDB, err := db.DB()

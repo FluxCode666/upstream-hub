@@ -55,5 +55,10 @@ RUN apk add --no-cache ca-certificates tzdata wget && \
 USER upstream
 WORKDIR /app
 COPY --from=go-builder /out/upstream-hub /app/upstream-hub
+# SQLite 默认数据目录。镜像里预创建并赋好属主（uid 10001），
+# docker 第一次初始化命名卷时会沿用该目录的属主；不预创建则卷是 root:root，
+# 非 root 运行用户写不进去，SQLite 报 "unable to open database file"。
+RUN mkdir -p /app/data && chown upstream:upstream /app/data
+VOLUME ["/app/data"]
 EXPOSE 8418
 ENTRYPOINT ["/app/upstream-hub"]
