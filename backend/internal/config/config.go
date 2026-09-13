@@ -25,7 +25,15 @@ type ServerConfig struct {
 	BaseURL        string   `mapstructure:"baseURL"`
 }
 
+// DatabaseConfig 数据库配置。
+//
+// Driver = "sqlite"（默认）：零依赖单文件数据库，数据落在 Path 指向的文件里，
+// 适合单机自部署。Driver = "postgres"：走原有的外部 PostgreSQL，此时 Host/Port/
+// User/Password/Name/SSLMode 才生效。
 type DatabaseConfig struct {
+	Driver string `mapstructure:"driver"`
+	Path   string `mapstructure:"path"`
+
 	Host         string `mapstructure:"host"`
 	Port         int    `mapstructure:"port"`
 	User         string `mapstructure:"user"`
@@ -39,6 +47,8 @@ type DatabaseConfig struct {
 
 func (d DatabaseConfig) ToStorageConfig() storage.DBConfig {
 	return storage.DBConfig{
+		Driver:       d.Driver,
+		Path:         d.Path,
 		Host:         d.Host,
 		Port:         d.Port,
 		User:         d.User,
@@ -124,6 +134,8 @@ type LogConfig struct {
 // 关键映射：
 //
 //	APP_SECRET                       -> security.appSecret
+//	UPSTREAMHUB_DATABASE_DRIVER      -> database.driver（sqlite | postgres）
+//	UPSTREAMHUB_DATABASE_PATH        -> database.path（sqlite 数据库文件）
 //	UPSTREAMHUB_DATABASE_HOST        -> database.host
 //	UPSTREAMHUB_SERVER_PORT          -> server.port
 //	UPSTREAMHUB_SCHEDULER_BALANCECRON-> scheduler.balanceCron
@@ -154,6 +166,8 @@ func Load(path string) (*Config, error) {
 	// Viper 坑：AutomaticEnv 只对已通过 SetDefault / BindEnv / 配置文件注册过的 key 生效；
 	// 数据库的 user/password/name 没有合理的默认值（拒绝写"change-me"作默认），
 	// 因此显式 BindEnv 以确保从环境变量读取。
+	_ = v.BindEnv("database.driver", "UPSTREAMHUB_DATABASE_DRIVER")
+	_ = v.BindEnv("database.path", "UPSTREAMHUB_DATABASE_PATH")
 	_ = v.BindEnv("database.host", "UPSTREAMHUB_DATABASE_HOST")
 	_ = v.BindEnv("database.port", "UPSTREAMHUB_DATABASE_PORT")
 	_ = v.BindEnv("database.user", "UPSTREAMHUB_DATABASE_USER")
@@ -181,6 +195,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.mode", "debug")
 	v.SetDefault("server.baseURL", "http://localhost:8418")
 
+	// 默认 SQLite：零依赖单文件，开箱即用。要继续用外部 PostgreSQL 时
+	// 显式设 database.driver = postgres（并填好 host/user/password/name）。
+	v.SetDefault("database.driver", "sqlite")
+	v.SetDefault("database.path", "upstream-hub.db")
+
+	// 以下默认值仅在 driver = postgres 时被用到。
 	v.SetDefault("database.host", "localhost")
 	v.SetDefault("database.port", 54329)
 	v.SetDefault("database.sslMode", "disable")

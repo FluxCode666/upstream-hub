@@ -69,8 +69,9 @@ func (r *Notifications) DeleteLogsBefore(cutoff time.Time) (int64, error) {
 //   - 存在但 last_sent_at < now - cooldown → 更新成 now，返回 true
 //   - 存在且仍在冷却窗口 → 不动，返回 false（跳过发送）
 //
-// 使用 PostgreSQL 的 INSERT ... ON CONFLICT DO UPDATE ... WHERE 一句 SQL 完成，
+// 使用 INSERT ... ON CONFLICT DO UPDATE ... WHERE 一句 SQL 完成，
 // 避免并发扫描下"两个 goroutine 同时认为 cooldown 已过、都发出去"的竞态。
+// 这段语法 PostgreSQL 与 SQLite（3.24+，含 excluded 伪表）都原生支持，无需分方言。
 //
 // cooldown <= 0 时直接返回 true 不写表。
 func (r *Notifications) TryClaimCooldown(channelID uint, event NotificationEvent, cooldown time.Duration) (bool, error) {

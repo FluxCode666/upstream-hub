@@ -4,14 +4,30 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
+	glebarez "github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
+// 支持的数据库驱动。
+const (
+	DriverSQLite   = "sqlite"
+	DriverPostgres = "postgres"
+)
+
 type DBConfig struct {
+	// Driver 数据库类型：sqlite（默认，零依赖单文件）| postgres。
+	// postgresql / pg 作为别名归一化处理；空值视为 sqlite。
+	Driver string
+	// Path sqlite 数据库文件路径，仅 Driver=sqlite 时生效。
+	Path string
+
+	// 以下字段仅 Driver=postgres 时生效。
 	Host         string
 	Port         int
 	User         string
@@ -47,7 +63,23 @@ func newGormLogger() logger.Interface {
 	)
 }
 
+// Open 按配置的驱动打开数据库连接。
+//
+// driver 为空或 "sqlite" 时使用纯 Go SQLite 驱动（glebarez/sqlite，基于 modernc，
+// 无 CGO 依赖，可与 CGO_ENABLED=0 的静态构建共存）；"postgres" / "postgresql" / "pg"
+// 走原有 PostgreSQL 路径。其他值报错，避免静默落到错误的后端。
 func Open(cfg DBConfig) (*gorm.DB, error) {
+	switch driver := strings.ToLower(strings.TrimSpace(cfg.Driver)); {
+	case driver == "" || driver == DriverSQLite:
+		return openSQLite(cfg)
+	case driver == DriverPostgres || driver == "postgresql" || driver == "pg":
+		return openPostgres(cfg)
+	default:
+		return nil, fmt.Errorf("unknown database driver %q (want %q or %q)", cfg.Driver, DriverSQLite, DriverPostgres)
+	}
+}
+
+func openPostgres(cfg DBConfig) (*gorm.DB, error) {
 	db, err := gorm.Open(postgres.Open(cfg.DSN()), &gorm.Config{
 		Logger: newGormLogger(),
 	})
@@ -63,7 +95,45 @@ func Open(cfg DBConfig) (*gorm.DB, error) {
 	return db, nil
 }
 
-// AutoMigrate 启动时自动同步表结构。生产环境也提供 migrations/*.sql 作为对照。
+func openSQLite(cfg DBConfig) (*gorm.DB, error) {
+	path := cfg.Path
+	if path == "" {
+		path = "upstream-hub.db"
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create sqlite data dir: %w", err)
+		}
+	}
+	// WAL + busy_timeout：SQLite 多读单写的模型下，并发扫描任务 + API 请求
+	// 偶尔撞锁时等待而不是直接报 SQLITE_BUSY；synchronous=NORMAL 配合 WAL
+	// 是性能 / 掉电安全性的常用折中。
+	dsn := fmt.Sprintf(
+		"%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)",
+		path,
+	)
+	db, err := gorm.Open(glebarez.Open(dsn), &gorm.Config{
+		Logger: newGormLogger(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("get sql.DB: %w", err)
+	}
+	// SQLite 写串行；连接池开太大只会增加撞锁等待。默认给 1 条写连接 + 少量读连接。
+	maxOpen := cfg.MaxOpenConns
+	if maxOpen <= 0 || maxOpen > 4 {
+		maxOpen = 4
+	}
+	sqlDB.SetMaxOpenConns(maxOpen)
+	sqlDB.SetMaxIdleConns(1)
+	return db, nil
+}
+
+// AutoMigrate 启动时自动同步表结构。SQLite 完全依赖这条路径；
+// PostgreSQL 生产环境也提供 migrations/*.sql 作为对照（注意那批 SQL 是 PG 方言）。
 func AutoMigrate(db *gorm.DB) error {
 	return db.AutoMigrate(
 		&Channel{},

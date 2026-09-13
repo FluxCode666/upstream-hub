@@ -43,6 +43,13 @@ backend/web/dist/*
 .DS_Store
 Thumbs.db
 
+# Local databases (SQLite 默认后端)
+backend/upstream-hub.db
+backend/upstream-hub.db-*
+*.db
+*.db-shm
+*.db-wal
+
 # Docker volumes
 postgres-data/
 

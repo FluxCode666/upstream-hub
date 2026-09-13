@@ -5,6 +5,14 @@ server:
   baseURL: "http://localhost:8418"
 
 database:
+  # 数据库后端：sqlite（默认，零依赖单文件）| postgres。
+  # sqlite：数据存在 path 指向的文件里，自带 WAL，单机自部署首选。
+  # postgres：继续用下面的外部 PostgreSQL 连接参数。
+  driver: sqlite
+  # sqlite 数据库文件路径（相对路径以工作目录为基准）。留空 = ./upstream-hub.db
+  path: "upstream-hub.db"
+
+  # ---- 以下仅 driver: postgres 时生效 ----
   host: localhost
   port: 54329
   user: upstreamhub

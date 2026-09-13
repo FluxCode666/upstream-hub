@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"sort"
 	"time"
 
 	"gorm.io/gorm"
@@ -105,6 +106,50 @@ type DailyAggregate struct {
 	Balance float64   `json:"balance"`
 }
 
+// truncateLocalDay 取 t 所在本地时区的当天 00:00。
+// 不能用 t.Truncate(24h)：那是对 UTC 时间零点取整，在东八区会把日界切到早上 8 点。
+func truncateLocalDay(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+}
+
+// balanceRow 聚合趋势时从库里捞出的最小字段集。
+type balanceRow struct {
+	ChannelID uint
+	SampledAt time.Time
+	Balance   float64
+}
+
+// aggregateLastPerBucket 对每个 (channel, bucket) 取桶内最后一次采样，再按桶求和。
+//
+// bucket 决定"天"还是"小时"粒度；trunc 把时间戳截断到桶起点（用本地时区）。
+// 之前这步用 PostgreSQL 的 date_trunc + CTE 在 SQL 里做；为了让 SQLite 也能跑
+// （SQLite 的日期函数会先把带时区的时间转成 UTC，日界会偏），改为把行拉回 Go 内存聚合。
+// 数据量是"渠道数 × 每 15 分钟一条 × N 天"，对单机自部署场景完全无压力。
+func aggregateLastPerBucket(rows []balanceRow, trunc func(time.Time) time.Time) []DailyAggregate {
+	type key struct {
+		channel uint
+		bucket  time.Time
+	}
+	last := make(map[key]balanceRow, len(rows))
+	for _, row := range rows {
+		k := key{row.ChannelID, trunc(row.SampledAt)}
+		if prev, ok := last[k]; !ok || row.SampledAt.After(prev.SampledAt) {
+			last[k] = row
+		}
+	}
+	sums := make(map[time.Time]float64, len(last))
+	for _, row := range last {
+		sums[trunc(row.SampledAt)] += row.Balance
+	}
+	out := make([]DailyAggregate, 0, len(sums))
+	for day, balance := range sums {
+		out = append(out, DailyAggregate{Day: day, Balance: balance})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Day.Before(out[j].Day) })
+	return out
+}
+
 // AggregateBalanceTrend 取最近 N 天的"日内最后一次余额"按渠道之和，作为总余额趋势。
 //
 // 实现：对每个 (channel_id, day) 取该天最后一次 BalanceSnapshot 的余额，再按 day 求和。
@@ -113,37 +158,15 @@ func (r *Rates) AggregateBalanceTrend(days int) ([]DailyAggregate, error) {
 	if days <= 0 {
 		days = 7
 	}
-	since := time.Now().AddDate(0, 0, -(days - 1)).Truncate(24 * time.Hour)
-	type row struct {
-		Day     time.Time
-		Balance float64
-	}
-	var rows []row
-	err := r.db.Raw(`
-		WITH per_day AS (
-			SELECT
-				channel_id,
-				date_trunc('day', sampled_at) AS day,
-				MAX(sampled_at)               AS last_at
-			FROM balance_snapshots
-			WHERE sampled_at >= ?
-			GROUP BY channel_id, date_trunc('day', sampled_at)
-		)
-		SELECT pd.day AS day, SUM(bs.balance) AS balance
-		FROM per_day pd
-		JOIN balance_snapshots bs
-		  ON bs.channel_id = pd.channel_id AND bs.sampled_at = pd.last_at
-		GROUP BY pd.day
-		ORDER BY pd.day ASC
-	`, since).Scan(&rows).Error
-	if err != nil {
+	since := truncateLocalDay(time.Now().AddDate(0, 0, -(days - 1)))
+	var rows []balanceRow
+	if err := r.db.Model(&BalanceSnapshot{}).
+		Select("channel_id, sampled_at, balance").
+		Where("sampled_at >= ?", since).
+		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	out := make([]DailyAggregate, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, DailyAggregate{Day: r.Day, Balance: r.Balance})
-	}
-	return out, nil
+	return aggregateLastPerBucket(rows, truncateLocalDay), nil
 }
 
 // AggregateBalanceTrendHourly 取最近 N 小时的"小时内最后一次余额"按渠道之和。
@@ -155,34 +178,13 @@ func (r *Rates) AggregateBalanceTrendHourly(hours int) ([]DailyAggregate, error)
 		hours = 24
 	}
 	since := time.Now().Add(-time.Duration(hours-1) * time.Hour).Truncate(time.Hour)
-	type row struct {
-		Day     time.Time
-		Balance float64
-	}
-	var rows []row
-	err := r.db.Raw(`
-		WITH per_hour AS (
-			SELECT
-				channel_id,
-				date_trunc('hour', sampled_at) AS hour,
-				MAX(sampled_at)                AS last_at
-			FROM balance_snapshots
-			WHERE sampled_at >= ?
-			GROUP BY channel_id, date_trunc('hour', sampled_at)
-		)
-		SELECT ph.hour AS day, SUM(bs.balance) AS balance
-		FROM per_hour ph
-		JOIN balance_snapshots bs
-		  ON bs.channel_id = ph.channel_id AND bs.sampled_at = ph.last_at
-		GROUP BY ph.hour
-		ORDER BY ph.hour ASC
-	`, since).Scan(&rows).Error
-	if err != nil {
+	var rows []balanceRow
+	if err := r.db.Model(&BalanceSnapshot{}).
+		Select("channel_id, sampled_at, balance").
+		Where("sampled_at >= ?", since).
+		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	out := make([]DailyAggregate, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, DailyAggregate{Day: r.Day, Balance: r.Balance})
-	}
-	return out, nil
+	// 整小时偏移的时区（如 Asia/Shanghai）下 Truncate(hour) 就是本地小时界。
+	return aggregateLastPerBucket(rows, func(t time.Time) time.Time { return t.Truncate(time.Hour) }), nil
 }
