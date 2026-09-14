@@ -83,6 +83,13 @@ func main() {
 	}
 
 	channels := storage.NewChannels(db)
+	// 清理旧版本软删除遗留的渠道行：它们仍占着 name 唯一索引，
+	// 会导致"删除后新建同名渠道"报唯一约束冲突。Delete 现已是硬删除，不会再新增。
+	if n, err := channels.PurgeSoftDeleted(); err != nil {
+		log.Warn("purge soft-deleted channels failed", "err", err)
+	} else if n > 0 {
+		log.Info("purged legacy soft-deleted channels", "count", n)
+	}
 	authSessions := storage.NewAuthSessions(db)
 	captchas := storage.NewCaptchas(db)
 	notifies := storage.NewNotifications(db)

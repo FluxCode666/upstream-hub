@@ -90,7 +90,7 @@ func createChannel(c *gin.Context, d *Deps) {
 		MonitorEnabled:   in.MonitorEnabled,
 	})
 	if err != nil {
-		if errors.Is(err, channel.ErrInvalidRechargeURL) {
+		if errors.Is(err, channel.ErrInvalidRechargeURL) || errors.Is(err, channel.ErrDuplicateName) {
 			fail(c, http.StatusBadRequest, err)
 			return
 		}

@@ -29,6 +29,9 @@ const tokenSessionTTL = 365 * 24 * time.Hour
 // ErrInvalidRechargeURL 标识充值链接未通过输入校验，API 层应映射为 400。
 var ErrInvalidRechargeURL = errors.New("充值链接无效")
 
+// ErrDuplicateName 标识渠道名称已被占用，API 层应映射为 400。
+var ErrDuplicateName = errors.New("渠道名称已存在")
+
 // Service 渠道领域服务。
 type Service struct {
 	Channels     *storage.Channels
@@ -89,6 +92,18 @@ type CreateInput struct {
 }
 
 func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return nil, errors.New("渠道名称不能为空")
+	}
+	// 重名预检：给出明确的错误而不是底层唯一索引报错。
+	// （历史遗留的软删同名行会被 hardDeleteSoftDeletedByName 顺带清掉。）
+	if existing, err := s.Channels.FindByName(name); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return nil, fmt.Errorf("%w：%s", ErrDuplicateName, name)
+	}
+	in.Name = name
 	rechargeURL, err := normalizeRechargeURL(in.RechargeURL)
 	if err != nil {
 		return nil, err
@@ -125,6 +140,10 @@ func (s *Service) Create(in CreateInput) (*storage.Channel, error) {
 	if mode == storage.CredentialModeToken {
 		// token 模式不依赖打码 provider
 		c.CaptchaConfigID = nil
+	}
+	// 兜底：清掉可能残留的软删同名行（旧版本删除逻辑遗留），避免撞唯一索引。
+	if err := s.Channels.HardDeleteSoftDeletedByName(name); err != nil {
+		return nil, err
 	}
 	if err := s.Channels.Create(c); err != nil {
 		return nil, err
@@ -313,8 +332,9 @@ func validateCredential(channelType storage.ChannelType, mode storage.Credential
 	return nil
 }
 
+// Delete 删除渠道。存储层会连带清理 session 与所有关联数据（硬删除，
+// 避免 name 唯一索引被软删行占用，导致之后无法新建同名渠道）。
 func (s *Service) Delete(id uint) error {
-	_ = s.AuthSessions.Delete(id)
 	return s.Channels.Delete(id)
 }
 
