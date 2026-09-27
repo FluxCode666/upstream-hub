@@ -1,6 +1,6 @@
 services:
   app:
-    # 生产流水线会把 GHCR 仓库和手动填写的版本标签写入服务器 .env。
+    # 生产流水线会把 GHCR 仓库和发布 tag 对应的版本标签写入服务器 .env。
     # 本地默认仍使用 Docker Hub 的 latest；也可手动覆盖仓库与标签。
     # 如果指定的 image 在 Docker Hub 找不到，且本机没缓存，会回落到 build 块从源码构建。
     # 完全离线 / 强制重建：`docker compose build`；强制重新拉：`docker compose pull`。

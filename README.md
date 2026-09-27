@@ -57,14 +57,17 @@ docker compose up -d
 http://localhost:8080
 ```
 
-默认使用 `worryzyy/upstream-hub:latest`（Docker Hub）镜像。需要固定版本时，在 `.env` 里设置：
+默认使用 `worryzyy/upstream-hub:latest`（Docker Hub）镜像。使用本仓库自动发布的固定版本时，在 `.env` 里设置：
 
 ```env
-UPSTREAMHUB_IMAGE=worryzyy/upstream-hub
-UPSTREAMHUB_IMAGE_TAG=v1.0.0
+UPSTREAMHUB_IMAGE=ghcr.io/<仓库所有者>/upstream-hub
+UPSTREAMHUB_IMAGE_TAG=v1.1.6
 ```
 
-生产流水线会自动改用当前仓库对应的 GHCR 镜像。GitHub Actions 配置、服务器准备、
+将 `<仓库所有者>` 替换为实际 GitHub 用户名或组织名。
+
+推送含中文说明的版本 tag 会自动构建 GHCR 镜像、创建 GitHub Release 并触发生产部署。
+每次发布前请更新 [更新日志](CHANGELOG.md)。GitHub Actions 配置、服务器准备、
 精简 Secrets 清单及回滚方法见
 [生产环境 CI/CD 部署文档](docs/cicd-production.md)。
 

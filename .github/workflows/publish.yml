@@ -1,20 +1,12 @@
-name: Deploy Production
+name: Publish Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "生产镜像版本，例如 v1.0.0"
-        required: true
-        type: string
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
-  packages: write
-
-concurrency:
-  group: upstream-hub-production-deploy
-  cancel-in-progress: false
 
 env:
   PLATFORMS: linux/amd64,linux/arm64
@@ -26,47 +18,50 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       source_commit: ${{ steps.release.outputs.source_commit }}
-      source_ref: ${{ steps.release.outputs.source_ref }}
-      source_type: ${{ steps.release.outputs.source_type }}
+      release_title: ${{ steps.release.outputs.release_title }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
           fetch-depth: 0
 
-      - name: Validate release version
+      - name: Validate release tag and changelog
         id: release
         shell: bash
         env:
-          VERSION: ${{ inputs.version }}
-          SOURCE_REF: ${{ github.ref_name }}
-          SOURCE_TYPE: ${{ github.ref_type }}
+          VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "::error::version 必须是合法的 Docker 镜像标签"
+          if [[ ! "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::发布 tag 必须是 vX.Y.Z 格式"
             exit 1
           fi
 
           source_commit="$(git rev-parse HEAD)"
-
-          if [[ "$SOURCE_TYPE" == "tag" ]]; then
-            tag_commit="$(git rev-list -n 1 "refs/tags/$SOURCE_REF")"
-            if [[ "$tag_commit" != "$source_commit" ]]; then
-              echo "::error::所选 Tag 与检出的提交不一致"
-              exit 1
-            fi
-          elif [[ "$SOURCE_TYPE" != "branch" ]]; then
-            echo "::error::仅支持从 Git Tag 或分支部署"
+          if [[ "$(git cat-file -t "refs/tags/$VERSION")" != "tag" ]]; then
+            echo "::error::请创建带中文说明的附注 tag，不能使用轻量 tag"
             exit 1
           fi
 
+          tag_commit="$(git rev-list -n 1 "refs/tags/$VERSION")"
+          if [[ "$tag_commit" != "$source_commit" ]]; then
+            echo "::error::发布 tag 与检出的提交不一致"
+            exit 1
+          fi
+
+          tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/$VERSION")"
+          if ! printf '%s' "$tag_subject" | python3 -c 'import sys; sys.exit(not any("\u3400" <= c <= "\u9fff" for c in sys.stdin.read()))'; then
+            echo "::error::附注 tag 的标题必须包含中文发布说明"
+            exit 1
+          fi
+
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+          python3 .github/scripts/release_notes.py "$VERSION" CHANGELOG.md > /dev/null
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
-          echo "source_ref=$SOURCE_REF" >> "$GITHUB_OUTPUT"
-          echo "source_type=$SOURCE_TYPE" >> "$GITHUB_OUTPUT"
+          echo "release_title=$VERSION - $tag_subject" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -106,9 +101,13 @@ jobs:
     name: Build and Push Image
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       image: ${{ steps.meta.outputs.image }}
       version: ${{ needs.verify.outputs.version }}
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -137,6 +136,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push production image
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -148,14 +148,52 @@ jobs:
           cache-to: type=gha,mode=max,scope=upstream-hub-production
           provenance: false
 
-  deploy:
-    name: Deploy Production
+  release:
+    name: Publish GitHub Release
     needs: [verify, build-and-push]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.source_commit }}
+
+      - name: Prepare Chinese release notes
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+          DIGEST: ${{ needs.build-and-push.outputs.digest }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_notes.py "$VERSION" CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          {
+            echo
+            echo "镜像：\`$IMAGE@$DIGEST\`"
+            echo "提交：\`$SOURCE_COMMIT\`"
+          } >> "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ needs.verify.outputs.release_title }}
+          body_path: ${{ runner.temp }}/release-notes.md
+
+  deploy:
+    name: Deploy Production
+    needs: [verify, build-and-push, release]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: upstream-hub-production-deploy
+      cancel-in-progress: false
     environment: production
     env:
       GHCR_IMAGE: ${{ needs.build-and-push.outputs.image }}
       IMAGE_TAG: ${{ needs.build-and-push.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-and-push.outputs.digest }}
       GHCR_USER: ${{ secrets.GHCR_USERNAME || github.repository_owner }}
       GHCR_PAT: ${{ secrets.GHCR_PAT }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/upstream-hub' }}
@@ -169,7 +207,7 @@ jobs:
           password: ${{ secrets.DEPLOY_PASSWORD }}
           port: ${{ secrets.DEPLOY_PORT || '22' }}
           fingerprint: ${{ secrets.SSH_FINGERPRINT }}
-          envs: GHCR_IMAGE,IMAGE_TAG,GHCR_USER,GHCR_PAT,DEPLOY_PATH,DEPLOY_RUN_ID
+          envs: GHCR_IMAGE,IMAGE_TAG,IMAGE_DIGEST,GHCR_USER,GHCR_PAT,DEPLOY_PATH,DEPLOY_RUN_ID
           sync: true
           command_timeout: 20m
           script: |
@@ -180,6 +218,14 @@ jobs:
             docker compose version >/dev/null
             [ -f docker-compose.yml ] || { echo "缺少 $DEPLOY_PATH/docker-compose.yml" >&2; exit 1; }
             [ -f .env ] || { echo "缺少 $DEPLOY_PATH/.env" >&2; exit 1; }
+
+            current_tag="$(sed -n 's/^UPSTREAMHUB_IMAGE_TAG=//p' .env | tail -n 1)"
+            if printf '%s' "$current_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' &&
+               [ "$current_tag" != "$IMAGE_TAG" ] &&
+               [ "$(printf '%s\n%s\n' "$IMAGE_TAG" "$current_tag" | sort -V | head -n 1)" = "$IMAGE_TAG" ]; then
+              echo "当前生产版本 $current_tag 高于 $IMAGE_TAG，跳过旧版本部署"
+              exit 0
+            fi
 
             registry_config="$(mktemp -d)"
             rollback_enabled=false
@@ -215,10 +261,11 @@ jobs:
               fi
             fi
 
-            if ! docker --config "$registry_config" pull "$GHCR_IMAGE:$IMAGE_TAG"; then
-              echo "无法拉取 $GHCR_IMAGE:$IMAGE_TAG；当前服务尚未修改" >&2
+            if ! docker --config "$registry_config" pull "$GHCR_IMAGE@$IMAGE_DIGEST"; then
+              echo "无法拉取 $GHCR_IMAGE@$IMAGE_DIGEST；当前服务尚未修改" >&2
               exit 1
             fi
+            docker tag "$GHCR_IMAGE@$IMAGE_DIGEST" "$GHCR_IMAGE:$IMAGE_TAG"
 
             set_env_value() {
               key="$1"
@@ -276,15 +323,15 @@ jobs:
             fi
             trap - 0
             rm -rf -- "$registry_config"
-            echo "生产环境部署完成：$GHCR_IMAGE:$IMAGE_TAG"
+            echo "生产环境部署完成：$GHCR_IMAGE@$IMAGE_DIGEST"
 
       - name: Deployment summary
         if: always()
         run: |
           {
-            echo "## 生产部署"
-            echo "- 源代码：\`${{ needs.verify.outputs.source_type }}:${{ needs.verify.outputs.source_ref }}\`"
-            echo "- 镜像：\`${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}\`"
+            echo "## 生产部署任务"
+            echo "- 目标 Tag：\`${{ needs.verify.outputs.version }}\`"
+            echo "- 镜像：\`${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}\`"
             echo "- 提交：\`${{ needs.verify.outputs.source_commit }}\`"
             echo "- 操作者：${{ github.actor }}"
           } >> "$GITHUB_STEP_SUMMARY"
