@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -37,6 +38,9 @@ jobs:
             echo "::error::发布 tag 必须是 vX.Y.Z 格式"
             exit 1
           fi
+
+          # checkout 会把事件提交重新写入同名 tag ref，按远端 tag ref 恢复附注对象。
+          git fetch --force --no-tags origin "refs/tags/$VERSION:refs/tags/$VERSION"
 
           source_commit="$(git rev-parse HEAD)"
           if [[ "$(git cat-file -t "refs/tags/$VERSION")" != "tag" ]]; then
