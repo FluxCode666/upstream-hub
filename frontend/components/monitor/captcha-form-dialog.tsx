@@ -109,7 +109,9 @@ export function CaptchaFormDialog({ open, onOpenChange, config }: CaptchaFormDia
     capsolver: { key: "CapSolver clientKey", endpoint: "https://api.capsolver.com（留空走默认）" },
     anticaptcha: { key: "Anti-Captcha clientKey", endpoint: "https://api.anti-captcha.com（留空走默认）" },
     yescaptcha: { key: "YesCaptcha clientKey", endpoint: "https://api.yescaptcha.com（留空走默认）" },
+    "capsolver-local": { key: "任意非空字符串（启停标记）", endpoint: "/app/cf-solver（cf-solver 包目录）" },
   }
+  const isLocal = form.type === "capsolver-local"
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -149,6 +151,7 @@ export function CaptchaFormDialog({ open, onOpenChange, config }: CaptchaFormDia
                 <SelectItem value="capsolver">CapSolver</SelectItem>
                 <SelectItem value="anticaptcha">AntiCaptcha</SelectItem>
                 <SelectItem value="yescaptcha">YesCaptcha</SelectItem>
+                <SelectItem value="capsolver-local">本机 cf-solver（Linux x64）</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -166,7 +169,11 @@ export function CaptchaFormDialog({ open, onOpenChange, config }: CaptchaFormDia
               required={!isEdit}
               disabled={submitting}
             />
-            <p className="text-[11px] text-muted-foreground">{"从打码平台后台获取，加密存储后不会回显。"}</p>
+            <p className="text-[11px] text-muted-foreground">
+              {isLocal
+                ? "本地 cf-solver 不消耗云打码额度，此字段只作启停标记：留空后该配置会被拒绝执行。"
+                : "从打码平台后台获取，加密存储后不会回显。"}
+            </p>
           </div>
 
           <div className="space-y-1.5">

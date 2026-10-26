@@ -86,6 +86,9 @@ const (
 	CaptchaTwoCaptcha  CaptchaProviderType = "2captcha"
 	CaptchaAntiCaptcha CaptchaProviderType = "anticaptcha"
 	CaptchaYesCaptcha  CaptchaProviderType = "yescaptcha"
+	// CaptchaCapSolverLocal 本地 cf-solver 便携包（Linux x64）。不发远程 HTTP，
+	// 由 captcha.Provider 直接 exec 包内 run.sh 取 turnstile_token。
+	CaptchaCapSolverLocal CaptchaProviderType = "capsolver-local"
 )
 
 // CaptchaConfig 打码平台配置。APIKeyCipher 加密保存，Extra 存放各平台差异化 JSON。
@@ -266,18 +269,18 @@ const (
 //
 // ChannelID 指上游渠道（storage.Channel），NotifyChannelID 指通知渠道。
 type AlertState struct {
-	ID              uint           `gorm:"primaryKey" json:"id"`
-	AlertID         string         `gorm:"size:64;not null;uniqueIndex" json:"alert_id"`
-	ChannelID       uint           `gorm:"not null;index:idx_alert_chan_event,priority:1" json:"channel_id"`
+	ID              uint              `gorm:"primaryKey" json:"id"`
+	AlertID         string            `gorm:"size:64;not null;uniqueIndex" json:"alert_id"`
+	ChannelID       uint              `gorm:"not null;index:idx_alert_chan_event,priority:1" json:"channel_id"`
 	Event           NotificationEvent `gorm:"size:64;not null;index:idx_alert_chan_event,priority:2" json:"event"`
-	NotifyChannelID uint            `json:"notify_channel_id,omitempty"`
-	FeishuMessageID string          `gorm:"size:64" json:"feishu_message_id,omitempty"`
-	Subject         string          `gorm:"type:text" json:"subject,omitempty"`
-	Body            string          `gorm:"type:text" json:"body,omitempty"`
-	Status          AlertStatus     `gorm:"size:16;not null;default:'pending'" json:"status"`
-	HandledBy       string          `gorm:"size:64" json:"handled_by,omitempty"`
-	HandledAt       *time.Time      `json:"handled_at,omitempty"`
-	CreatedAt       time.Time       `gorm:"not null;index" json:"created_at"`
+	NotifyChannelID uint              `json:"notify_channel_id,omitempty"`
+	FeishuMessageID string            `gorm:"size:64" json:"feishu_message_id,omitempty"`
+	Subject         string            `gorm:"type:text" json:"subject,omitempty"`
+	Body            string            `gorm:"type:text" json:"body,omitempty"`
+	Status          AlertStatus       `gorm:"size:16;not null;default:'pending'" json:"status"`
+	HandledBy       string            `gorm:"size:64" json:"handled_by,omitempty"`
+	HandledAt       *time.Time        `json:"handled_at,omitempty"`
+	CreatedAt       time.Time         `gorm:"not null;index" json:"created_at"`
 }
 
 func (AlertState) TableName() string { return "alert_states" }

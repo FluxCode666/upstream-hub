@@ -21,6 +21,7 @@ export type CaptchaProviderType =
   | "2captcha"
   | "anticaptcha"
   | "yescaptcha"
+  | "capsolver-local"
 
 export type MonitorJob = "login" | "balance" | "rates"
 

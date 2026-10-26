@@ -40,6 +40,10 @@ backend/config.yaml
 postgres-data/
 .claude/
 
+# cf-solver 由 Dockerfile 从固定 Release 下载并校验，本地解压目录和诊断产物不进构建上下文。
+cf-solver-*/
+cf-solver-*.tar.gz
+
 # 文档（构建不需要）
 docs/
 README.md
